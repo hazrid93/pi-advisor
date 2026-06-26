@@ -72,10 +72,18 @@ export class AdvisorRuntime {
 	#lastResult: AdvisorReviewResult | null = null;
 	#lastAdvisorModel: string | null = null;
 
+	/** Injectable review function — defaults to {@link runAdvisorReview}. Exposed
+	 *  so the runtime's queue/epoch/retry discipline can be unit-tested with a
+	 *  fake review instead of a real model call. */
+	#review: (sessionUpdate: string, advisorModelRef: string) => Promise<AdvisorReviewResult>;
+
 	constructor(
 		private readonly host: AdvisorRuntimeHost,
 		private readonly config: AdvisorConfig,
-	) {}
+		review?: (sessionUpdate: string, advisorModelRef: string) => Promise<AdvisorReviewResult>,
+	) {
+		this.#review = review ?? ((text, ref) => runAdvisorReview(text, ref, this.#realDeps()));
+	}
 
 	get isBusy(): boolean {
 		return this.#busy;
@@ -175,7 +183,7 @@ export class AdvisorRuntime {
 
 				this.#consecutiveFailures = 0;
 				this.#lastResult = result;
-			if (result.advise) {
+				if (result.advise) {
 					const note: AdvisorNote = { note: result.advise.note, severity: result.advise.severity };
 					await this.host.sendAdvice([note], this.#lastAdvisorModel ?? this.config.advisorModel ?? "");
 				}
@@ -190,11 +198,13 @@ export class AdvisorRuntime {
 		const ref = this.config.advisorModel;
 		if (!ref) return { advise: null, rounds: 0, error: "No advisor model configured" };
 		this.#lastAdvisorModel = ref;
+		return this.#review(sessionUpdate, ref);
+	}
 
-		const model = this.host.resolveModel(ref);
-		if (!model) return { advise: null, rounds: 0, error: `Advisor model not found: ${ref}` };
-
-		return runAdvisorReview(sessionUpdate, ref, {
+	/** Build the real {@link AdvisorLoopDeps} for {@link runAdvisorReview}. */
+	#realDeps(): Parameters<typeof runAdvisorReview>[2] {
+		const model = this.host.resolveModel(this.config.advisorModel!);
+		return {
 			resolveModel: () => model,
 			getApiKeyAndHeaders: (m) => this.host.getApiKeyAndHeaders(m),
 			cwd: this.hostCwd,
@@ -204,7 +214,7 @@ export class AdvisorRuntime {
 			thinkingLevel: this.config.thinkingLevel,
 			systemPrompt: this.config.systemPrompt,
 			onUsage: () => {},
-		});
+		};
 	}
 
 	// cwd is captured per-turn via the host; stored here for the sync review path.

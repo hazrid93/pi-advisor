@@ -39,6 +39,14 @@ import { ADVISOR_SYSTEM_PROMPT, ADVISE_TOOL_DESCRIPTION } from "./prompts.js";
 
 void ADVISE_TOOL_DESCRIPTION;
 
+/** The completion function signature — pi-ai's `completeSimple`. Injected so the
+ *  loop is unit-testable with a fake model (no network, no API key). */
+export type AdvisorComplete = (
+	model: Model<Api>,
+	context: { systemPrompt?: string; messages: Message[]; tools?: ReturnType<typeof advisorTools> },
+	options?: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal; reasoning?: string },
+) => Promise<AssistantMessage>;
+
 /** Dependencies the loop needs from the host (held by the runtime). */
 export interface AdvisorLoopDeps {
 	/** Resolve the advisor model from the configured "provider/id" ref. */
@@ -61,6 +69,8 @@ export interface AdvisorLoopDeps {
 	systemPrompt?: string;
 	/** Optional sink for advisor model usage (tokens/cost) for /advisor status. */
 	onUsage?: (usage: AssistantMessage["usage"], model: Model<Api>) => void;
+	/** Injected completion function (defaults to pi-ai's `completeSimple`). */
+	complete?: AdvisorComplete;
 }
 
 /** The result of one advisor review. */
@@ -99,6 +109,7 @@ export async function runAdvisorReview(
 	const systemPrompt = deps.systemPrompt ?? ADVISOR_SYSTEM_PROMPT;
 	const tools = advisorTools();
 	const reasoning = resolveAdvisorReasoning(model, deps.thinking, deps.thinkingLevel);
+	const complete = deps.complete ?? completeSimple;
 	const maxRounds = Math.min(deps.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
 
 	const messages: Message[] = [
@@ -115,7 +126,7 @@ export async function runAdvisorReview(
 
 		let response: AssistantMessage;
 		try {
-			response = await completeSimple(
+			response = await complete(
 				model,
 				{ systemPrompt, messages, tools },
 				{

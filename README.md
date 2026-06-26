@@ -417,7 +417,46 @@ Created automatically at `~/.pi/agent/extensions/pi-advisor.json` on first chang
 ```bash
 pnpm install
 pnpm typecheck   # tsc --noEmit (latest pi: @earendil-works/*@0.80.2)
+pnpm test        # vitest — 66 unit tests, no API key needed
 ```
+
+### Testing
+
+The repo ships a **vitest unit suite (66 tests)** that confirms the core logic
+without any network or API key — the advisor loop runs against a *scriptable
+fake `complete`*, so every code path is deterministic:
+
+| Suite | Covers |
+|---|---|
+| `__tests__/agent.test.ts` | the advisor loop: capture `advise` (with/without exploration), silence, round cap, model-not-found, no-auth, thrown errors, `reasoning` gating, the four tools sent |
+| `__tests__/runtime.test.ts` | `AdvisorRuntime`: happy-path delivery, no-model/disabled no-ops, 3-strike failure drop, recovery after error, epoch-guard drop on reset, dispose, cursor seeding (no replay), own-`<advisory>` filtering, `reviewNow`, `deliveryOptions` |
+| `__tests__/transcript.test.ts` | delta building: full window, cursor advances, nothing-new → null, own-message filtering, window bounding, stale-cursor re-prime |
+| `__tests__/tools.test.ts` | the read-only toolset: `read` (offset/limit/missing), `find` (glob, skips `node_modules`), `grep` (literal/regex/case-insensitive/no-match), `advise` capture, path-confinement via `..`, `resolveAdvisorReasoning` gating |
+| `__tests__/config.test.ts` | config normalization/persistence, `provider/id` parsing, severity ladder, `<advisory>` framing + XML escaping |
+
+The agent loop is testable because `runAdvisorReview` takes an **injectable
+`complete`** (`AdvisorLoopDeps.complete`); production wires pi-ai's
+`completeSimple`, tests wire a scriptable fake. Likewise `AdvisorRuntime`
+takes an injectable `review` so its queue/epoch/retry discipline is tested
+without a real model call.
+
+### Live smoke test (verified)
+
+The extension was smoke-tested against real models via `pi -e ./advisor.ts`
+in print mode, confirming the full ported pipeline:
+
+- **Main agent `litellm/kimi-k2.7` + advisor `litellm/glm-5.2`.**
+- On a deliberately buggy prompt (an off-by-one `sumFirst`), the advisor ran
+  the `completeSimple` loop, spotted the bug in 1 round, and called `advise`
+  with severity `concern`:
+  > *"The function you output sums 0..n-1 … but the user's stated goal was
+  > 'sums 1..n' … prefer correctness: `for (let i = 1; i <= n; i++) s += i;`"*
+- The note was delivered via `pi.sendMessage` as an interrupting
+  `<advisory severity="concern">` (`steer` + `triggerTurn`), which resumed the
+  agent to fix it. The follow-up review correctly returned **silent** (the
+  agent had corrected itself).
+- On correct turns the advisor stayed silent (the intended "prefer silence
+  when the agent is on track" behaviour).
 
 ### Structure
 
@@ -433,6 +472,13 @@ pnpm typecheck   # tsc --noEmit (latest pi: @earendil-works/*@0.80.2)
 │   └── runtime.ts        # AdvisorRuntime: backlog, single-flight, epoch guards, retries, delivery
 ├── docs/
 │   └── architecture.md   # Standalone architecture + flow doc (linked from the GitHub profile)
+├── __tests__/            # vitest unit suite (66 tests, no API key needed)
+│   ├── agent.test.ts     # advisor loop: advise/silence/round-cap/errors/reasoning-gating
+│   ├── runtime.test.ts   # backlog, epoch guards, 3-strike drop, cursor seeding, delivery
+│   ├── transcript.test.ts# delta building, cursor, own-message filtering, bounding
+│   ├── tools.test.ts     # read-only tools: read/find/grep/advise, path confinement
+│   └── config.test.ts    # config normalization, model-ref, severity, <advisory> framing
+├── vitest.config.ts
 ├── package.json
 ├── tsconfig.json
 └── README.md

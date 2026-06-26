@@ -325,25 +325,35 @@ async function tryRipgrep(
 		];
 		if (opts.caseInsensitive) args.push("-i");
 		if (opts.literal) {
-			args.push("--fixed-strings");
+			// --fixed-strings makes -e treat the pattern as a literal substring.
+			args.push("--fixed-strings", "-e", pattern);
 		} else {
 			// rg uses Rust regex, not JS regex. Most patterns are compatible; if a
 			// pattern uses JS-only features rg errors and we fall back to the node walk.
 			args.push("--regexp", pattern);
 		}
 		args.push(abs);
-		const child = execFile("rg", args, { maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-			if (err) {
-				// rg not installed (ENOENT) or pattern unsupported — fall back.
-				const code = (err as NodeJS.ErrnoException)?.code;
-				if (code === "ENOENT") return resolve(null);
-				// Other rg errors: fall back to node walk rather than surfacing rg's error.
-				return resolve(null);
-			}
-			const trimmed = stdout.replace(/\n$/, "");
-			resolve(trimmed || "No matches.");
+		let settled = false;
+		const child = execFile(
+			"rg",
+			args,
+			{ maxBuffer: 4 * 1024 * 1024, timeout: 5000 },
+			(err, stdout) => {
+				if (settled) return;
+				settled = true;
+				if (err) {
+					// rg not installed (ENOENT), timed out, or pattern unsupported — fall back.
+					return resolve(null);
+				}
+				const trimmed = stdout.replace(/\n$/, "");
+				resolve(trimmed || "No matches.");
+			},
+		);
+		child.on("error", () => {
+			if (settled) return;
+			settled = true;
+			resolve(null);
 		});
-		child.on("error", () => resolve(null));
 	});
 }
 
