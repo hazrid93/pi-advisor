@@ -61,6 +61,21 @@ describe("normalizeConfig", () => {
 		expect(c.thinking).toBe(true);
 		expect(c.thinkingLevel).toBe("high");
 	});
+
+	it("interrupting defaults to true (all advice interrupts)", () => {
+		expect(DEFAULT_CONFIG.interrupting).toBe(true);
+		expect(normalizeConfig(null).interrupting).toBe(true);
+	});
+
+	it("respects an explicit interrupting: false", () => {
+		const c = normalizeConfig({ interrupting: false });
+		expect(c.interrupting).toBe(false);
+	});
+
+	it("ignores a non-boolean interrupting value", () => {
+		const c = normalizeConfig({ interrupting: "yes" as unknown as boolean });
+		expect(c.interrupting).toBe(true); // stays at default
+	});
 });
 
 describe("isInterruptingSeverity", () => {

@@ -236,30 +236,36 @@ export class AdvisorRuntime {
  *    agent sees it at the next boundary and acts on it next turn. */
 export function deliveryOptions(
 	severity: AdvisorNote["severity"],
+	forceInterrupting = false,
 ): { deliverAs: "steer"; triggerTurn?: boolean } {
-	if (isInterruptingSeverity(severity)) {
+	if (forceInterrupting || isInterruptingSeverity(severity)) {
 		return { deliverAs: "steer", triggerTurn: true };
 	}
 	return { deliverAs: "steer" };
 }
 
-/** Build the host wiring that turns runtime advice into a `pi.sendMessage` call. */
-export function makeHost(pi: {
-	sendMessage: (
-		message: {
-			customType: string;
-			content: string;
-			display: boolean;
-			details: unknown;
-		},
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-	) => void | Promise<void>;
-}): Pick<AdvisorRuntimeHost, "sendAdvice"> {
+/** Build the host wiring that turns runtime advice into a `pi.sendMessage` call.
+ *  `getInterrupting` is read live on each delivery so the `/advisor interrupting`
+ *  toggle takes effect without rebuilding the host. */
+export function makeHost(
+	pi: {
+		sendMessage: (
+			message: {
+				customType: string;
+				content: string;
+				display: boolean;
+				details: unknown;
+			},
+			options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		) => void | Promise<void>;
+	},
+	getInterrupting: () => boolean = () => false,
+): Pick<AdvisorRuntimeHost, "sendAdvice"> {
 	return {
 		sendAdvice: async (notes, model) => {
 			const content = formatAdvisorBatchContent(notes);
 			const details: AdvisorMessageDetails = { notes, model };
-			const opts = deliveryOptions(notes[0]?.severity);
+			const opts = deliveryOptions(notes[0]?.severity, getInterrupting());
 			await pi.sendMessage(
 				{
 					customType: ADVISOR_CUSTOM_TYPE,

@@ -218,13 +218,12 @@ The loop never touches the primary session — its only side-effect is the captu
 
 ### Delivery: nit vs concern/blocker
 
-Captured advice is rendered as `<advisory>` elements and delivered via `pi.sendMessage`:
+Captured advice is rendered as `<advisory>` elements and delivered via `pi.sendMessage`. The `/advisor interrupting` toggle (default **on**) controls whether `nit` also interrupts:
 
-| Severity | `deliverAs` | `triggerTurn` | Effect |
-|---|---|---|---|
-| `nit` (default) | `"steer"` | — | Non-interrupting. Queues for delivery at the next step boundary while the agent streams; if the agent is idle, waits for the next user prompt. The agent keeps working uninterrupted. |
-| `concern` | `"steer"` | `true` | Interrupting. Steered into the agent; if idle, **resumes the run immediately** so the advice is acted on now. |
-| `blocker` | `"steer"` | `true` | Interrupting. Same as `concern` — use when continuing would clearly waste work. |
+| Severity | `interrupting` off | `interrupting` on (default) |
+|---|---|---|
+| `nit` | non-interrupting — queues for the next step boundary; agent keeps working | **interrupting** — triggers a turn now, agent acknowledges/acts immediately |
+| `concern` / `blocker` | interrupting — resumes an idle agent immediately | interrupting (same) |
 
 The note body is XML-escaped so advice containing `<`, `>`, or `&` can't break the wrapper:
 
@@ -328,7 +327,7 @@ Advisor: enabled
 Advisor model: anthropic/claude-sonnet-4-5
 Thinking: off
 Context window: last 30 entries · max 6 tool rounds
-Delivery: nit → non-interrupting, concern/blocker → interrupting (steer + triggerTurn)
+Delivery: ALL advice interrupts (steer + triggerTurn)
 Active: yes
 Runtime: not started yet (no turn reviewed)
 ```
@@ -350,12 +349,13 @@ All control is via the single `/advisor` slash command in the TUI. Tab-completio
 | `/advisor disable` | Disable the advisor — turns are no longer reviewed, but the chosen model is kept. |
 | `/advisor status` | Show config + state: enabled/disabled, current model, thinking, window size, busy flag, and the last review result. |
 | `/advisor thinking <off\|minimal\|low\|medium\|high\|xhigh>` | Set the advisor's thinking effort (`off` disables thinking). |
+| `/advisor interrupting [on\|off]` | Toggle whether **ALL** advice — including `nit` — triggers a new agent turn immediately. **Default: on** (the agent acknowledges/acts on every note). Run with no arg to flip, or `on`/`off` to set explicitly. When off, `nit` lands as a non-interrupting note for the next turn while `concern`/`blocker` still interrupt. |
 | `/advisor review` | **Manually** re-review the recent transcript now and await the result (the only synchronous path). |
 | `/advisor help` | Print the command list. |
 
 **Enable / disable** and **model selection** are fully supported and persist to `~/.pi/agent/extensions/pi-advisor.json` (so they survive restarts). The advisor also re-reads the config on each `session_start`, so changes made from another window take effect.
 
-> **No "wait / catch-up" mode.** The advisor is strictly **fire-and-forget**: it reviews in the background after each turn and never blocks the main agent. If it falls behind, the main agent just keeps going — a late review still lands (via `pi.sendMessage`) whenever it finishes, and an interrupting `concern`/`blocker` will resume an idle agent. There is no setting that makes the main loop pause for a backed-up advisor. The closest thing is the manual `/advisor review`, which awaits a single on-demand review.
+> **No "wait / catch-up" mode.** The advisor is strictly **fire-and-forget**: it reviews in the background after each turn and never blocks the main agent. If it falls behind, the main agent just keeps going — a late review still lands (via `pi.sendMessage`) whenever it finishes. By default `/advisor interrupting` is **on**, so any advice (even a `nit`) triggers a new turn immediately and the agent acknowledges/acts on it; run `/advisor interrupting off` to make `nit` land silently (visible only on the next turn) while `concern`/`blocker` still interrupt. Either way, there is no setting that makes the main loop *pause* for a backed-up advisor — the closest thing is the manual `/advisor review`, which awaits a single on-demand review.
 
 ### Troubleshooting
 

@@ -109,6 +109,12 @@ export interface AdvisorConfig {
 	/** Max attempts to retry a failed advisor review before dropping the backlog
 	 *  so the session never stalls. Mirrors oh-my-pi's 3-strike drop. */
 	maxRetries: number;
+	/** When true (default), ALL advice — including `nit` — is delivered as
+	 *  interrupting (triggers a new agent turn immediately so the agent
+	 *  acknowledges/acts on every note). When false, only `concern`/`blocker`
+	 *  interrupt; `nit` lands as a non-interrupting note visible on the next
+	 *  turn. Toggled with `/advisor interrupting`. */
+	interrupting: boolean;
 	/** Override the advisor system prompt. Defaults to the built-in prompt. */
 	systemPrompt?: string;
 }
@@ -121,6 +127,7 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	contextEntries: 30,
 	maxToolRounds: 6,
 	maxRetries: 3,
+	interrupting: true,
 };
 
 const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
@@ -180,6 +187,7 @@ export function normalizeConfig(raw: unknown): AdvisorConfig {
 	) {
 		base.maxRetries = Math.floor(obj.maxRetries);
 	}
+	if (typeof obj.interrupting === "boolean") base.interrupting = obj.interrupting;
 	if (typeof obj.systemPrompt === "string" && obj.systemPrompt.trim()) {
 		base.systemPrompt = obj.systemPrompt;
 	}

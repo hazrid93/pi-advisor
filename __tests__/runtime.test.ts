@@ -96,13 +96,19 @@ async function settle(rt: AdvisorRuntime, ms = 50): Promise<void> {
 }
 
 describe("deliveryOptions", () => {
-	it("nit is non-interrupting (no triggerTurn)", () => {
+	it("nit is non-interrupting when forceInterrupting is false", () => {
 		expect(deliveryOptions("nit")).toEqual({ deliverAs: "steer" });
 		expect(deliveryOptions(undefined)).toEqual({ deliverAs: "steer" });
 	});
 	it("concern and blocker are interrupting (triggerTurn: true)", () => {
 		expect(deliveryOptions("concern")).toEqual({ deliverAs: "steer", triggerTurn: true });
 		expect(deliveryOptions("blocker")).toEqual({ deliverAs: "steer", triggerTurn: true });
+	});
+	it("forceInterrupting makes ALL severities interrupting (including nit)", () => {
+		expect(deliveryOptions("nit", true)).toEqual({ deliverAs: "steer", triggerTurn: true });
+		expect(deliveryOptions(undefined, true)).toEqual({ deliverAs: "steer", triggerTurn: true });
+		expect(deliveryOptions("concern", true)).toEqual({ deliverAs: "steer", triggerTurn: true });
+		expect(deliveryOptions("blocker", true)).toEqual({ deliverAs: "steer", triggerTurn: true });
 	});
 });
 

@@ -46,7 +46,7 @@ let runtime: AdvisorRuntime | null = null;
  *  resolution, advice delivery, and user notification. */
 function buildHost(pi: ExtensionAPI, ctxForBranch: () => ExtensionContext | null) {
 	return {
-		...makeHost(pi),
+		...makeHost(pi, () => config.interrupting),
 		getBranch: () => ctxForBranch()?.sessionManager.getBranch() ?? [],
 		resolveModel: (ref: string) => {
 			const parsed = parseModelRef(ref);
@@ -112,7 +112,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("advisor", {
 		description: ADVISOR_COMMAND_DESCRIPTION,
 		getArgumentCompletions(prefix: string) {
-			const subs = ["model", "status", "enable", "disable", "thinking", "help", "review"];
+			const subs = ["model", "status", "enable", "disable", "thinking", "interrupting", "help", "review"];
 			const matches = subs.filter((s) => s.startsWith(prefix));
 			return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
 		},
@@ -146,14 +146,15 @@ async function handleAdvisorCommand(
 				"  /advisor status        Show config + last review",
 				"  /advisor enable        Enable the advisor",
 				"  /advisor disable       Disable the advisor (keeps the model)",
+				"  /advisor interrupting [on|off]  Toggle whether ALL advice interrupts (default: on)",
 				"  /advisor thinking <off|minimal|low|medium|high|xhigh>",
 				"                          Set the advisor's thinking effort (off = disabled)",
 				"  /advisor review        Re-review the recent transcript now",
 				"  /advisor help          This message",
 				"",
 				"Config: ~/.pi/agent/extensions/pi-advisor.json",
-				"Advice is delivered as <advisory severity=...> notes: nit (non-interrupting),",
-				"concern/blocker (interrupting).",
+				"Advice is delivered as <advisory severity=...> notes: nit (non-interrupting when",,
+				"interrupting is off), concern/blocker (always interrupting).",
 			].join("\n"),
 			"info",
 		);
@@ -177,6 +178,11 @@ async function handleAdvisorCommand(
 
 	if (sub === "thinking") {
 		handleThinking(ctx, rest);
+		return;
+	}
+
+	if (sub === "interrupting") {
+		handleInterrupting(ctx, rest);
 		return;
 	}
 
@@ -263,6 +269,31 @@ function handleThinking(ctx: ExtensionCommandContext, rest: string): void {
 	);
 }
 
+/** Toggle whether ALL advice interrupts (triggers a new agent turn immediately)
+ *  or only concern/blocker do (nit lands silently for next turn). Default: on. */
+function handleInterrupting(ctx: ExtensionCommandContext, rest: string): void {
+	const arg = rest.trim().toLowerCase();
+	if (!arg) {
+		// No arg = toggle.
+		const next = !config.interrupting;
+		updateConfig(
+			ctx,
+			(c) => ({ ...c, interrupting: next }),
+			`Advisor interrupting ${next ? "on" : "off"}.`,
+		);
+		return;
+	}
+	if (arg === "on" || arg === "yes" || arg === "true") {
+		updateConfig(ctx, (c) => ({ ...c, interrupting: true }), "Advisor interrupting on — all advice triggers a turn.");
+		return;
+	}
+	if (arg === "off" || arg === "no" || arg === "false") {
+		updateConfig(ctx, (c) => ({ ...c, interrupting: false }), "Advisor interrupting off — nit lands silently, concern/blocker still interrupt.");
+		return;
+	}
+	ctx.ui.notify(`Usage: /advisor interrupting [on|off]. Current: ${config.interrupting ? "on" : "off"}.`, "warning");
+}
+
 /** Interactive model picker. Lists every available (auth-configured) model,
  *  reasoning-capable and currently-selected ones first. */
 async function showPicker(ctx: ExtensionCommandContext): Promise<void> {
@@ -331,7 +362,7 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	lines.push(`Advisor model: ${config.advisorModel ?? "(none — pick one with /advisor)"}`);
 	lines.push(`Thinking: ${config.thinking ? `on (${config.thinkingLevel})` : "off"}`);
 	lines.push(`Context window: last ${config.contextEntries} entries · max ${config.maxToolRounds} tool rounds`);
-	lines.push(`Delivery: nit → non-interrupting, concern/blocker → interrupting (steer + triggerTurn)`);
+	lines.push(`Delivery: ${config.interrupting ? "ALL advice interrupts" : "nit → non-interrupting, concern/blocker → interrupting"} (steer${config.interrupting ? " + triggerTurn" : " + triggerTurn for concern/blocker"})`);
 
 	const active = config.enabled && !!config.advisorModel;
 	lines.push(`Active: ${active ? "yes" : "no"}`);
