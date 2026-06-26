@@ -268,20 +268,23 @@ note text
 
 Pick one of these three methods.
 
-**A. `pi install` from GitHub (recommended)** — fetches the repo and wires it into `settings.json` for you:
+**A. `pi install` from GitHub (recommended)** — clones the repo and adds it to `~/.pi/agent/settings.json` for you:
 ```bash
-pi install github.com/hazrid93/pi-advisor
-# equivalent:
-# pi install https://github.com/hazrid93/pi-advisor
+# pick any one of these equivalent forms (the scheme/prefix matters):
+pi install https://github.com/hazrid93/pi-advisor
+pi install git:github.com/hazrid93/pi-advisor
+pi install git:git@github.com:hazrid93/pi-advisor        # over SSH
 ```
+> ⚠️ The bare form `pi install github.com/hazrid93/pi-advisor` (no scheme) does **not** work — pi treats a bare path as a local directory. Always prefix with `https://` or `git:` (or `ssh://`).
 
-**B. Add to `settings.json` manually.** Edit `~/.pi/agent/settings.json`:
+**B. Add to `settings.json` manually.** Edit `~/.pi/agent/settings.json` and add the repo under `packages`:
 ```json
 {
   "packages": [
-    "github.com/hazrid93/pi-advisor"
+    "git:github.com/hazrid93/pi-advisor"
   ]
 }
+```
 ```
 
 **C. Quick one-off test** (no install) — load the file directly for a single session:
@@ -369,7 +372,8 @@ All control is via the single `/advisor` slash command in the TUI. Tab-completio
 ### Uninstall
 
 ```bash
-pi uninstall github.com/hazrid93/pi-advisor
+pi uninstall git:github.com/hazrid93/pi-advisor
+# or: pi remove https://github.com/hazrid93/pi-advisor
 ```
 Or remove the entry from the `packages` array in `~/.pi/agent/settings.json` and `/reload`. Optionally delete the config file:
 ```bash
