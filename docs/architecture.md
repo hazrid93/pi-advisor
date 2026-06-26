@@ -1,70 +1,23 @@
-<div align="center">
+# pi-advisor — Architecture & Flow
 
-# 🧭 pi-advisor
+> A second model that peer-reviews every turn of your main [pi](https://github.com/earendil-works/pi-coding-agent) agent and injects concise advice. This is the standalone architecture doc linked from the [GitHub profile](https://github.com/hazrid93); the user-facing guide is the [repo README](../README.md).
 
-**A second model that peer-reviews every turn of your main [pi](https://github.com/earendil-works/pi-coding-agent) agent and injects concise advice.**
-
-_Pick any model from your registry as the advisor — it watches, reads the workspace, and surfaces one note before your agent sinks work into the wrong direction._
-
-[![pi extension](https://img.shields.io/badge/pi-extension-blueviolet)](https://github.com/earendil-works/pi-coding-agent)
-[![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-[![pi 0.80+](https://img.shields.io/badge/pi-%3E%3D0.80-8A2BE2)](https://github.com/earendil-works/pi-coding-agent)
-
-</div>
+`pi-advisor` is the [pi extension](https://github.com/earendil-works/pi-coding-agent) port of the **advisor logic from [`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)** (its `packages/coding-agent/src/advisor/` package), rebuilt against pi's public extension API. oh-my-pi's advisor is welded into its own forked agent runtime; this extension delivers the same behaviour to stock pi via lifecycle events, custom tools, and `pi.sendMessage`.
 
 ---
 
-## The idea
+## 1. The one-paragraph version
 
-The best coding agents get tunnel vision. They commit to a fragile approach, miss an edge case, or keep drilling into a hole that won't satisfy your request. `pi-advisor` attaches a **second model** — the *advisor* — that passively reviews each turn of your main agent and, when something's worth saying, injects a single terse note.
-
-It is **not a second executor.** The advisor cannot edit files, run commands, approve actions, or change session state. It can only read the workspace (`read` / `grep` / `find`) and call `advise`. The main agent decides what to do with the advice — the note is framed `weigh, don't blindly obey`, not an order.
-
-This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) port of the **advisor logic from [`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)** (its `packages/coding-agent/src/advisor/` package), rebuilt against pi's public extension API. oh-my-pi's advisor is welded into its own forked agent runtime; this extension delivers the same behaviour to stock pi via events, custom tools, and `pi.sendMessage`.
-
-> **TL;DR flow:** on every `turn_end` the advisor gets a bounded slice of the transcript, runs a read-only tool loop on a second model you pick, and (if it has something worth saying) calls `advise` — which lands in your main agent's context as an `<advisory>` note (`nit` = gentle, `concern`/`blocker` = interrupting).
+On every primary `turn_end`, the extension takes a bounded slice of the session transcript (the advisor's own `<advisory>` notes filtered out so it never reviews itself), hands it to a **second model the user picked** as a "Session update", and lets that model explore the workspace with a hard-isolated read-only toolset (`read`/`grep`/`find`) before calling `advise(note, severity)`. The captured note is rendered as an `<advisory>` element and delivered back into the main agent's context via `pi.sendMessage` — `nit` lands non-interruptingly, `concern`/`blocker` interrupt (steer + resume an idle agent). The advisor never edits files, runs commands, or changes session state; it only reads and advises.
 
 ---
 
-## Table of contents
-
-- [Architecture](#architecture)
-  - [Component diagram](#component-diagram)
-  - [Module responsibilities](#module-responsibilities)
-  - [What's ported from oh-my-pi](#whats-ported-from-oh-my-pi)
-  - [What's different (and why)](#whats-different-and-why)
-- [Flow](#flow)
-  - [End-to-end sequence](#end-to-end-sequence)
-  - [The advisor agent loop](#the-advisor-agent-loop)
-  - [Delivery: nit vs concern/blocker](#delivery-nit-vs-concernblocker)
-  - [Failure, reset & re-prime](#failure-reset--re-prime)
-- [Installation](#installation)
-  - [Prerequisites](#prerequisites)
-  - [Install](#install)
-  - [First run — pick an advisor model](#first-run--pick-an-advisor-model)
-  - [Verify it's working](#verify-its-working)
-  - [Troubleshooting](#troubleshooting)
-  - [Uninstall](#uninstall)
-- [Usage](#usage)
-  - [Commands](#commands)
-  - [Config file](#config-file)
-  - [Advice severity & delivery](#advice-severity--delivery)
-- [Development](#development)
-- [Acknowledgements](#acknowledgements)
-- [License](#license)
-
----
-
-## Architecture
-
-`pi-advisor` is a single pi extension (`advisor.ts`) backed by a small `src/` library. It hooks pi's lifecycle events, runs a background review on a second model per turn, and delivers captured advice back into the primary session.
-
-### Component diagram
+## 2. Component diagram
 
 ```
                          ┌─────────────────────────────── pi (main agent) ──────────────────────────────┐
                          │                                                                              │
-   user prompt ───────► │  agent loop: LLM ↔ built-in tools (bash/edit/read/...)                         │
+   user prompt ────────► │  agent loop: LLM ↔ built-in tools (bash/edit/read/...)                       │
                          │     │                                                                        │
                          │     │  (each turn)                                                            │
                          │     ▼                                                                        │
@@ -119,7 +72,9 @@ This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) po
                                                 back into the main agent's context (next turn)
 ```
 
-### Module responsibilities
+---
+
+## 3. Module responsibilities
 
 | File | Layer | Responsibility |
 |---|---|---|
@@ -131,31 +86,9 @@ This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) po
 | `src/agent.ts` | **Loop** | `runAdvisorReview()` — the advisor agent loop with pi-ai's `completeSimple()`: prompt → tool calls → execute read-only tools locally → capture `advise` → loop until `advise`/silence/round cap. Uses `/compat` so `reasoning`/thinking is honoured. |
 | `src/runtime.ts` | **Runtime** | `AdvisorRuntime` — the discipline ported from oh-my-pi: backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding, and `nit`→steer / `concern`→steer+triggerTurn delivery via `pi.sendMessage`. |
 
-### What's ported from oh-my-pi
-
-| oh-my-pi (internal) | pi-advisor (extension) |
-|---|---|
-| `advisor/runtime.ts` — backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding | `src/runtime.ts` (same discipline, adapted to `completeSimple`) |
-| `advisor/advise-tool.ts` — `nit` / `concern` / `blocker` severities, `<advisory guidance="weigh, don't blindly obey">` framing, severity-rank dedupe | `src/index.ts` + `src/tools.ts` (`advise` tool + `formatAdvisorBatchContent`) |
-| `prompts/advisor/system.md` + `advise-tool.md` — the reviewer role definition | `src/prompts.ts` (ported verbatim) |
-| hard-isolated read-only toolset (`read` / `search` / `find`) on a distinct `ToolSession` | `src/tools.ts` — re-implemented `read` / `grep` / `find` against the filesystem, read-only by construction, confined to the project root |
-| per-turn transcript delta via `formatSessionHistoryMarkdown`, advisor's own notes filtered out | `src/transcript.ts` — bounded trailing window via pi's public `convertToLlm` + `serializeConversation`, `<advisory>` entries filtered out |
-| `nit` non-interrupting aside vs `concern`/`blocker` interrupting steer | `src/runtime.ts` `deliveryOptions()` → pi's `sendMessage` `deliverAs: "steer"` + `triggerTurn` |
-| `advisor.immuneTurns` / `syncBacklog` | not ported — pi's extension API doesn't expose the steering/yield internals those tune; reviews are fire-and-forget from `turn_end` instead |
-
-### What's different (and why)
-
-- **No second `Agent`.** oh-my-pi's advisor is a full `Agent` with its own append-only context, telemetry, and tool loop. The public pi extension API doesn't expose `Agent`, so the advisor loop is reimplemented with pi-ai's `completeSimple()` (`src/agent.ts`): prompt → tool calls → execute read-only tools locally → capture `advise` → loop until advise/silence/round cap.
-- **`completeSimple`, not `complete`.** The `reasoning`/thinking option is only honoured on the `streamSimple` path; the plain `stream` path ignores it. Importing `completeSimple` from `@earendil-works/pi-ai/compat`.
-- **Bounded recent window, not a byte-delta.** oh-my-pi feeds only the per-turn delta (rendered with its internal markdown formatter). This extension can't reach that formatter, so it sends a bounded trailing transcript window via pi's public `convertToLlm` + `serializeConversation` — the same helpers pi's own `handoff` example uses. Slicing whole entries keeps assistant/toolCall + toolResult pairs intact.
-- **Fire-and-forget reviews.** A review kicked from `turn_end` runs in the background and never blocks the main agent; advice lands via `pi.sendMessage` when ready. (oh-my-pi's `syncBacklog` pause-the-agent modes aren't reproducible without access to the steering/yield internals.)
-- **Read-only tools re-implemented, not shared.** oh-my-pi builds its read/search/find against a distinct `ToolSession`. The extension API can't create a second tool session, so the read-only primitives are re-implemented directly against the filesystem — they are read-only by construction (no write/edit code path exists) and confined to the project root (paths escaping via `..` are rejected).
-
 ---
 
-## Flow
-
-### End-to-end sequence
+## 4. End-to-end flow
 
 A single primary turn, from the user's prompt to a delivered advisory note:
 
@@ -200,7 +133,7 @@ A single primary turn, from the user's prompt to a delivered advisory note:
   │◄──────────── (agent acts on / weighs the advice, or continues) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 ```
 
-### The advisor agent loop
+### 4.1 The advisor agent loop
 
 `runAdvisorReview()` (`src/agent.ts`) is the heart of the advisor. For each review it:
 
@@ -215,7 +148,7 @@ A single primary turn, from the user's prompt to a delivered advisory note:
 
 The loop never touches the primary session — its only side-effect is the captured `advise` note.
 
-### Delivery: nit vs concern/blocker
+### 4.2 Delivery: nit vs concern/blocker
 
 Captured advice is rendered as `<advisory>` elements and delivered via `pi.sendMessage`:
 
@@ -233,217 +166,37 @@ note text
 </advisory>
 ```
 
-### Failure, reset & re-prime
+### 4.3 Failure, reset & re-prime
 
-- **3-strike drop.** A failed review (model not found, no API key, network error, abort) increments a consecutive-failure counter. After `maxRetries` (default 3) the backlog is dropped and a warning is logged — a broken advisor model never stalls the session. Below the cap, the batch is re-queued with a 1s backoff.
+- **3-strike drop.** A failed review (model not found, no API key, network error, abort) increments a consecutive-failure counter. After `maxRetries` (default 3) consecutive failures the backlog is dropped and a warning is logged — a broken advisor model never stalls the session. Below the cap, the batch is re-queued with a 1s backoff.
 - **Epoch guards.** Every `session_start` / `reset` / `dispose` bumps an `epoch` counter. A drain iteration captures the epoch before its `await`s; if the epoch changed when it resumes (the session was replaced/compacted mid-review), the stale batch is **dropped** instead of being delivered into the new conversation.
 - **Re-prime, no replay.** On `session_start` the cursor is seeded to the current leaf (`seedToLeaf`), so enabling the advisor mid-session doesn't replay the whole old conversation on the first turn. On compaction/session-switch the cursor resets so the next turn replays the bounded window against the post-rewrite transcript.
 - **No recursive review.** The advisor's own `<advisory>` entries are filtered out of its review window, so it never reviews (and re-raises) its own advice.
 
 ---
 
-## Installation
+## 5. What's ported from oh-my-pi vs. what's adapted
 
-### Prerequisites
+| oh-my-pi (internal) | pi-advisor (extension) | Notes |
+|---|---|---|
+| `advisor/runtime.ts` — backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding | `src/runtime.ts` | Same discipline, adapted to drive `completeSimple` instead of a second `Agent`. |
+| `advisor/advise-tool.ts` — `nit`/`concern`/`blocker` severities, `<advisory guidance="weigh, don't blindly obey">` framing, severity-rank dedupe | `src/index.ts` + `src/tools.ts` | `advise` tool + `formatAdvisorBatchContent`. |
+| `prompts/advisor/system.md` + `advise-tool.md` — the reviewer role definition | `src/prompts.ts` | Ported verbatim. |
+| hard-isolated read-only toolset (`read`/`search`/`find`) on a distinct `ToolSession` | `src/tools.ts` | Re-implemented against the filesystem; read-only by construction (no write/edit code path exists) and confined to the project root. |
+| per-turn transcript delta via `formatSessionHistoryMarkdown`, advisor's own notes filtered out | `src/transcript.ts` | Bounded trailing window via pi's public `convertToLlm` + `serializeConversation`; `<advisory>` entries filtered out. |
+| `nit` non-interrupting aside vs `concern`/`blocker` interrupting steer | `src/runtime.ts` `deliveryOptions()` | Mapped onto pi's `sendMessage` `deliverAs: "steer"` + `triggerTurn`. |
+| `advisor.immuneTurns` / `syncBacklog` | **not ported** | pi's extension API doesn't expose the steering/yield internals those tune; reviews are fire-and-forget from `turn_end` instead. |
 
-1. **pi ≥ 0.80** — install from [omp.sh](https://omp.sh) or:
-   ```bash
-   # macOS / Linux
-   curl -fsSL https://omp.sh/install | sh
-   # or, with bun
-   bun install -g @earendil-works/pi-coding-agent
-   ```
-   Verify: `pi --version`
+### Key adaptations (and why)
 
-2. **At least one model with a configured API key.** The advisor is just another model call, so it reuses pi's existing `ModelRegistry` auth — no separate key management. Configure a provider key the normal way (`/login`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, a custom provider extension, etc.). Check what's available:
-   ```bash
-   pi --list-models
-   ```
-   The advisor picker only lists models pi reports as **available** (auth configured), so any model you see there can be your advisor.
-
-> The advisor is a *second* model call per turn, so it adds its own token cost. A cheap, fast model (e.g. a `smol`/flash-tier model) is a good default advisor; a stronger model is better at catching subtle issues but costs more.
-
-### Install
-
-Pick one of these three methods.
-
-**A. `pi install` from GitHub (recommended)** — fetches the repo and wires it into `settings.json` for you:
-```bash
-pi install github.com/hazrid93/pi-advisor
-# equivalent:
-# pi install https://github.com/hazrid93/pi-advisor
-```
-
-**B. Add to `settings.json` manually.** Edit `~/.pi/agent/settings.json`:
-```json
-{
-  "packages": [
-    "github.com/hazrid93/pi-advisor"
-  ]
-}
-```
-
-**C. Quick one-off test** (no install) — load the file directly for a single session:
-```bash
-git clone https://github.com/hazrid93/pi-advisor
-cd pi-advisor
-pi -e ./advisor.ts
-```
-
-After **A** or **B**, reload so pi discovers the new extension:
-```bash
-/reload
-```
-(or restart pi). Installed extensions are auto-discovered from `~/.pi/agent/extensions/` and hot-reloadable with `/reload`.
-
-### First run — pick an advisor model
-
-The advisor ships **enabled but with no model**, so it does nothing until you pick one:
-
-```
-/advisor
-```
-
-This opens an interactive picker listing every available model, with your current choice (if any) and reasoning-capable models sorted to the top. Select one with `Enter`, cancel with `Esc`. Your choice persists to `~/.pi/agent/extensions/pi-advisor.json`.
-
-Or set it directly without the picker:
-```
-/advisor model anthropic/claude-sonnet-4-5
-/advisor model openai/gpt-4o-mini
-```
-
-### Verify it's working
-
-```
-/advisor status
-```
-
-You should see something like:
-```
-Advisor: enabled
-Advisor model: anthropic/claude-sonnet-4-5
-Thinking: off
-Context window: last 30 entries · max 6 tool rounds
-Delivery: nit → non-interrupting, concern/blocker → interrupting (steer + triggerTurn)
-Active: yes
-Runtime: not started yet (no turn reviewed)
-```
-
-Now just use pi normally. After each turn the advisor reviews the recent transcript in the background; if it has something worth saying you'll see an `<advisory>` note appear in the transcript. Force a re-review on demand any time with:
-```
-/advisor review
-```
-
-### Troubleshooting
-
-| Symptom | Cause / Fix |
-|---|---|
-| `Advisor model not found: …` | The `provider/id` in your config doesn't match any model in the registry. Re-run `/advisor` to pick from the live list, or `/advisor model <provider/id>`. |
-| `No API key for advisor model …` | The chosen model has no configured auth. Run `/login` for that provider or set its env var (e.g. `ANTHROPIC_API_KEY`), then `/advisor` again. The picker only shows *available* models, so this usually means auth was removed after you picked the model. |
-| Advisor never says anything | This is usually correct — the advisor prefers silence when the agent is on track. Check `/advisor status` → "last review: silent (N rounds)". If it's always silent even on tricky turns, try a stronger advisor model or enable thinking: `/advisor thinking medium`. |
-| `last review failed: …` repeated | The advisor model is erroring (rate limit, bad endpoint, etc.). After `maxRetries` (default 3) consecutive failures the backlog is dropped so your session isn't stalled. Switch models with `/advisor` or fix the provider. |
-| Advice isn't interrupting on `concern`/`blocker` | Interruption uses pi's steer + `triggerTurn`. If the main agent is mid-tool, the note lands at the next step boundary. An idle agent is resumed immediately. This is expected. |
-| Config edits don't take effect | The runtime caches config in-memory; run the command that changes it (`/advisor enable`, `/advisor model …`, etc.) rather than hand-editing, or `/reload` after editing the JSON file. |
-| Path errors from the advisor's `read`/`grep`/`find` | The read-only tools are confined to the project root (`cwd`). Paths escaping via `..` are rejected. This is intentional isolation, ported from oh-my-pi. |
-
-### Uninstall
-
-```bash
-pi uninstall github.com/hazrid93/pi-advisor
-```
-Or remove the entry from the `packages` array in `~/.pi/agent/settings.json` and `/reload`. Optionally delete the config file:
-```bash
-rm ~/.pi/agent/extensions/pi-advisor.json
-```
+- **No second `Agent`.** oh-my-pi's advisor is a full `Agent` with its own append-only context, telemetry, and tool loop. The public pi extension API doesn't expose `Agent`, so the advisor loop is reimplemented with pi-ai's `completeSimple()`.
+- **`completeSimple`, not `complete`.** The `reasoning`/thinking option is only honoured on the `streamSimple` path; the plain `stream` path ignores it. Importing `completeSimple` from `@earendil-works/pi-ai/compat`.
+- **Bounded recent window, not a byte-delta.** oh-my-pi feeds only the per-turn delta (rendered with its internal markdown formatter). This extension can't reach that formatter, so it sends a bounded trailing transcript window via pi's public helpers (the same ones pi's own `handoff` example uses). Slicing whole entries keeps assistant/toolCall + toolResult pairs intact.
+- **Fire-and-forget reviews.** A review kicked from `turn_end` runs in the background and never blocks the main agent; advice lands via `pi.sendMessage` when ready.
+- **Read-only tools re-implemented, not shared.** oh-my-pi builds its read/search/find against a distinct `ToolSession`. The extension API can't create a second tool session, so the read-only primitives are re-implemented directly against the filesystem — read-only by construction and confined to the project root.
 
 ---
 
-## Usage
+## 6. Acknowledgements
 
-### Commands
-
-| Command | What it does |
-|---------|-------------|
-| `/advisor` | Open the model picker to choose the advisor model |
-| `/advisor model <provider/id>` | Set the advisor model directly |
-| `/advisor status` | Show config + last review |
-| `/advisor enable` / `disable` | Master switch (keeps the configured model) |
-| `/advisor thinking <off\|minimal\|low\|medium\|high\|xhigh>` | Set the advisor's thinking effort (`off` = disabled) |
-| `/advisor review` | Re-review the recent transcript now |
-| `/advisor help` | Show usage reference |
-
-### Config file
-
-Created automatically at `~/.pi/agent/extensions/pi-advisor.json` on first change:
-
-```json
-{
-  "enabled": true,
-  "advisorModel": "anthropic/claude-sonnet-4-5",
-  "thinking": false,
-  "thinkingLevel": "medium",
-  "contextEntries": 30,
-  "maxToolRounds": 6,
-  "maxRetries": 3,
-  "systemPrompt": null
-}
-```
-
-| Field | Default | Effect |
-|-------|---------|--------|
-| `enabled` | `true` | Master switch. When `false`, no review occurs. |
-| `advisorModel` | `null` | The advisor, as `provider/id`. `null` = not configured (advisor inactive). |
-| `thinking` | `false` | Whether the advisor reasons before reviewing. Adds latency + cost; off by default. |
-| `thinkingLevel` | `"medium"` | Thinking effort when `thinking` is on (only honoured if the advisor model declares `reasoning: true`). |
-| `contextEntries` | `30` | How many trailing session entries to feed the advisor as context each turn. Bounded for cost + pairing safety. |
-| `maxToolRounds` | `6` | Max read-only tool rounds per review before the advisor must `advise` or yield. Hard-capped at 12. |
-| `maxRetries` | `3` | Max attempts to retry a failed review before dropping the backlog (mirrors oh-my-pi's 3-strike drop so a broken model never stalls the session). |
-| `systemPrompt` | _(built-in)_ | Override the advisor system prompt. |
-
-> The config path uses pi's `getAgentDir()` — set `PI_CODING_AGENT_DIR` to relocate it.
-
-### Advice severity & delivery
-
-| Severity | Delivery | Intended use |
-|----------|----------|--------------|
-| `nit` (default) | Non-interrupting — lands at the next step boundary; agent keeps working. | Cleanup, simplification, low-risk edge cases. |
-| `concern` | Interrupting — steered into the agent; resumes an idle agent immediately. | Material risk, likely wrong direction, missing constraint, hallucinated API. |
-| `blocker` | Interrupting — same as `concern`. | Continuing would clearly waste work or produce broken output. |
-
----
-
-## Development
-
-```bash
-pnpm install
-pnpm typecheck   # tsc --noEmit (latest pi: @earendil-works/*@0.80.2)
-```
-
-### Structure
-
-```
-.
-├── advisor.ts            # Wiring layer: pi event hooks (turn_end, session_*) + /advisor command
-├── src/
-│   ├── index.ts          # Config schema, persistence, model-ref + severity helpers, <advisory> framing
-│   ├── prompts.ts        # Advisor system prompt + advise-tool description (ported from oh-my-pi)
-│   ├── tools.ts          # Hard-isolated read-only toolset (read/grep/find) + advise capture
-│   ├── transcript.ts     # Bounded "Session update" delta builder (convertToLlm + serializeConversation)
-│   ├── agent.ts          # The advisor agent loop (completeSimple + tools + advise capture)
-│   └── runtime.ts        # AdvisorRuntime: backlog, single-flight, epoch guards, retries, delivery
-├── docs/
-│   └── architecture.md   # Standalone architecture + flow doc (linked from the GitHub profile)
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
----
-
-## Acknowledgements
-
-The advisor concept, system prompt, severity ladder, `<advisory>` framing, and the runtime discipline (backlog queue, epoch guards, 3-strike failure drop, cursor seeding, own-message filtering) are all from **[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)**'s advisor package (`packages/coding-agent/src/advisor/`). This project ports that logic to stock pi's extension API. The picker/config-file conventions follow [`monotykamary/pi-vision-handoff`](https://github.com/monotykamary/pi-vision-handoff).
-
-## License
-
-MIT
+The advisor concept, system prompt, severity ladder, `<advisory>` framing, and the runtime discipline (backlog queue, epoch guards, 3-strike failure drop, cursor seeding, own-message filtering) are all from **[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)**'s advisor package (`packages/coding-agent/src/advisor/`). The picker/config-file conventions follow [`monotykamary/pi-vision-handoff`](https://github.com/monotykamary/pi-vision-handoff).
