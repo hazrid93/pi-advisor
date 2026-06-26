@@ -1,0 +1,51 @@
+{
+  "name": "pi-advisor",
+  "version": "0.1.0",
+  "description": "A second model that peer-reviews every turn of your main pi agent and injects concise advice. Pick any model from your registry as the advisor.",
+  "type": "module",
+  "author": "hazrid93",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hazrid93/pi-advisor.git"
+  },
+  "homepage": "https://github.com/hazrid93/pi-advisor#readme",
+  "bugs": {
+    "url": "https://github.com/hazrid93/pi-advisor/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "advisor",
+    "peer-programmer",
+    "review",
+    "second-model",
+    "model-selector"
+  ],
+  "files": [
+    "*.ts",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.80.2",
+    "@earendil-works/pi-ai": "0.80.2",
+    "@earendil-works/pi-coding-agent": "0.80.2",
+    "@earendil-works/pi-tui": "0.80.2",
+    "@types/node": "^22.0.0",
+    "typebox": "1.1.38",
+    "typescript": "^5.6.0"
+  },
+  "pi": {
+    "extensions": [
+      "./advisor.ts"
+    ]
+  },
+  "packageManager": "pnpm@9.0.0"
+}

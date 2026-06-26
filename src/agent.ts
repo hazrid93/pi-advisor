@@ -1,0 +1,209 @@
+/**
+ * The advisor agent loop.
+ *
+ * oh-my-pi implements the advisor as a full `Agent` (from its pi-agent-core
+ * fork) with its own append-only context, telemetry, and tool-execution loop.
+ * The public pi extension API doesn't expose that `Agent` class, so this module
+ * re-implements the essential advisor loop with pi-ai's `completeSimple()`: it
+ * prompts the advisor model with the session update + a hard-isolated read-only
+ * toolset, executes read/grep/find locally, captures the `advise` call, and
+ * loops until the advisor calls `advise`, stays silent, or hits the round cap.
+ *
+ * `completeSimple` (not `complete`) is used because the `reasoning`/thinking
+ * option is only honoured on the `streamSimple` path — the plain `stream` path
+ * ignores it. Tools ride in `context.tools` and are forwarded by every
+ * provider's `streamSimple` implementation, so tool-calling + thinking both
+ * work.
+ *
+ * The loop never mutates the primary session: its only side-effect is the
+ * captured `advise` note, which the runtime delivers via `pi.sendMessage`.
+ */
+
+import type {
+	Api,
+	AssistantMessage,
+	Message,
+	Model,
+	TextContent,
+	ToolCall,
+	ToolResultMessage,
+} from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import {
+	advisorTools,
+	executeAdvisorTool,
+	resolveAdvisorReasoning,
+	type AdviseCapture,
+} from "./tools.js";
+import { ADVISOR_SYSTEM_PROMPT, ADVISE_TOOL_DESCRIPTION } from "./prompts.js";
+
+void ADVISE_TOOL_DESCRIPTION;
+
+/** Dependencies the loop needs from the host (held by the runtime). */
+export interface AdvisorLoopDeps {
+	/** Resolve the advisor model from the configured "provider/id" ref. */
+	resolveModel(ref: string): Model<Api> | undefined;
+	/** Resolve auth (api key + headers) for the advisor model. */
+	getApiKeyAndHeaders(model: Model<Api>): Promise<
+		{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }
+	>;
+	/** The advisor's working directory (the session cwd) — confines read/grep/find. */
+	cwd: string;
+	/** Abort signal for the in-flight review (the turn's signal, or a local one). */
+	signal?: AbortSignal;
+	/** Max read-only tool rounds before the advisor must `advise` or yield. */
+	maxToolRounds: number;
+	/** Whether the advisor model should reason before reviewing. */
+	thinking: boolean;
+	/** Thinking effort when `thinking` is on. */
+	thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh";
+	/** Override the system prompt (otherwise the built-in advisor prompt). */
+	systemPrompt?: string;
+	/** Optional sink for advisor model usage (tokens/cost) for /advisor status. */
+	onUsage?: (usage: AssistantMessage["usage"], model: Model<Api>) => void;
+}
+
+/** The result of one advisor review. */
+export interface AdvisorReviewResult {
+	/** The captured advise note, or null when the advisor chose silence. */
+	advise: AdviseCapture | null;
+	/** Number of tool rounds executed. */
+	rounds: number;
+	/** Failure reason, when the review could not complete. */
+	error?: string;
+}
+
+/** Hard cap on total loop iterations even if maxToolRounds is set very high. */
+const ABSOLUTE_MAX_ROUNDS = 12;
+
+/** Run one advisor review. Returns the captured advice (or null for silence). */
+export async function runAdvisorReview(
+	sessionUpdate: string,
+	advisorModelRef: string,
+	deps: AdvisorLoopDeps,
+): Promise<AdvisorReviewResult> {
+	const model = deps.resolveModel(advisorModelRef);
+	if (!model) {
+		return { advise: null, rounds: 0, error: `Advisor model not found: ${advisorModelRef}` };
+	}
+
+	const auth = await deps.getApiKeyAndHeaders(model);
+	if (!auth.ok || !auth.apiKey) {
+		return {
+			advise: null,
+			rounds: 0,
+			error: !auth.ok ? auth.error : `No API key for advisor model ${advisorModelRef}`,
+		};
+	}
+
+	const systemPrompt = deps.systemPrompt ?? ADVISOR_SYSTEM_PROMPT;
+	const tools = advisorTools();
+	const reasoning = resolveAdvisorReasoning(model, deps.thinking, deps.thinkingLevel);
+	const maxRounds = Math.min(deps.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
+
+	const messages: Message[] = [
+		{ role: "user", content: sessionUpdate, timestamp: Date.now() },
+	];
+
+	let rounds = 0;
+	let advise: AdviseCapture | null = null;
+
+	while (rounds <= maxRounds) {
+		if (deps.signal?.aborted) {
+			return { advise: null, rounds, error: "aborted" };
+		}
+
+		let response: AssistantMessage;
+		try {
+			response = await completeSimple(
+				model,
+				{ systemPrompt, messages, tools },
+				{
+					apiKey: auth.apiKey,
+					headers: auth.headers,
+					signal: deps.signal,
+					reasoning,
+				},
+			);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			// An abort surfaces as an error here; classify it so the runtime
+			// doesn't retry a deliberate cancel.
+			if (deps.signal?.aborted) return { advise: null, rounds, error: "aborted" };
+			return { advise: null, rounds, error: message };
+		}
+
+		try {
+			deps.onUsage?.(response.usage, model);
+		} catch {
+			// never let usage reporting break a review
+		}
+
+		const toolCalls = response.content.filter(
+			(c): c is ToolCall => c.type === "toolCall",
+		);
+
+		// No tool calls → the advisor either spoke (ignored) or stayed silent.
+		// Either way the review is done; only an `advise` capture delivers advice.
+		if (toolCalls.length === 0) {
+			return { advise, rounds };
+		}
+
+		// Feed the assistant turn back so tool results pair correctly.
+		messages.push(response);
+
+		// Execute each tool call. `advise` captures and ends the loop; the
+		// read-only tools run and their results are appended as toolResult
+		// messages for the next round.
+		let capturedThisRound: AdviseCapture | null = null;
+		for (const call of toolCalls) {
+			if (deps.signal?.aborted) return { advise: null, rounds, error: "aborted" };
+
+			if (call.name === "advise") {
+				const args = (call.arguments ?? {}) as Record<string, unknown>;
+				const note = typeof args.note === "string" ? args.note : "";
+				const severity = args.severity;
+				if (note.trim()) {
+					capturedThisRound = {
+						note,
+						severity:
+							severity === "nit" || severity === "concern" || severity === "blocker"
+								? (severity as AdviseCapture["severity"])
+								: undefined,
+					};
+				}
+				// Acknowledge the advise call so the model sees a result if it
+				// were to continue (it won't — we break below).
+				messages.push(toolResult(call, capturedThisRound ? "Recorded." : "Empty advice ignored.", false));
+				continue;
+			}
+
+			const result = await executeAdvisorTool(call.name, (call.arguments ?? {}) as Record<string, unknown>, deps.cwd);
+			messages.push(toolResult(call, result.content, result.isError === true));
+		}
+
+		if (capturedThisRound) {
+			advise = capturedThisRound;
+			return { advise, rounds: rounds + 1 };
+		}
+
+		rounds++;
+	}
+
+	// Hit the round cap without advising. Treat as silence rather than an error
+	// — the advisor explored but had nothing conclusive to raise.
+	return { advise, rounds };
+}
+
+/** Build a toolResult message for a tool call. */
+function toolResult(call: ToolCall, text: string, isError: boolean): ToolResultMessage {
+	const content: TextContent[] = [{ type: "text", text }];
+	return {
+		role: "toolResult",
+		toolCallId: call.id,
+		toolName: call.name,
+		content,
+		isError,
+		timestamp: Date.now(),
+	};
+}
