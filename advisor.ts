@@ -101,8 +101,6 @@ export default function (pi: ExtensionAPI) {
 		if (!config.enabled || !config.advisorModel) return;
 		const rt = ensureRuntime(pi, ctxForBranch);
 		rt.setCwd(ctx.cwd);
-		// Fire-and-forget: the review runs in the background and never blocks the
-		// main agent. Advice lands via pi.sendMessage when ready.
 		rt.onTurnEnd(ctx.sessionManager.getBranch());
 	});
 

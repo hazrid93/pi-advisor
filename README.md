@@ -43,6 +43,7 @@ This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) po
   - [Install](#install)
   - [First run — pick an advisor model](#first-run--pick-an-advisor-model)
   - [Verify it's working](#verify-its-working)
+  - [Interactive commands (`/advisor`)](#interactive-commands-advisor)
   - [Troubleshooting](#troubleshooting)
   - [Uninstall](#uninstall)
 - [Usage](#usage)
@@ -333,6 +334,25 @@ Now just use pi normally. After each turn the advisor reviews the recent transcr
 ```
 /advisor review
 ```
+
+### Interactive commands (`/advisor`)
+
+All control is via the single `/advisor` slash command in the TUI. Tab-completion offers the subcommands.
+
+| Command | What it does |
+|---|---|
+| `/advisor` | Open the **interactive model picker** — lists every available (auth-configured) model, with your current choice and reasoning-capable models sorted to the top. `Enter` to select, `Esc` to cancel. Picking a model also enables the advisor. |
+| `/advisor model <provider/id>` | Set the advisor model directly, e.g. `/advisor model litellm/glm-5.2`. Validates the model exists in the registry. |
+| `/advisor enable` | Enable the advisor (reviews resume). |
+| `/advisor disable` | Disable the advisor — turns are no longer reviewed, but the chosen model is kept. |
+| `/advisor status` | Show config + state: enabled/disabled, current model, thinking, window size, busy flag, and the last review result. |
+| `/advisor thinking <off\|minimal\|low\|medium\|high\|xhigh>` | Set the advisor's thinking effort (`off` disables thinking). |
+| `/advisor review` | **Manually** re-review the recent transcript now and await the result (the only synchronous path). |
+| `/advisor help` | Print the command list. |
+
+**Enable / disable** and **model selection** are fully supported and persist to `~/.pi/agent/extensions/pi-advisor.json` (so they survive restarts). The advisor also re-reads the config on each `session_start`, so changes made from another window take effect.
+
+> **No "wait / catch-up" mode.** The advisor is strictly **fire-and-forget**: it reviews in the background after each turn and never blocks the main agent. If it falls behind, the main agent just keeps going — a late review still lands (via `pi.sendMessage`) whenever it finishes, and an interrupting `concern`/`blocker` will resume an idle agent. There is no setting that makes the main loop pause for a backed-up advisor. The closest thing is the manual `/advisor review`, which awaits a single on-demand review.
 
 ### Troubleshooting
 
