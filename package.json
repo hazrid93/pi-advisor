@@ -3,6 +3,9 @@
   "version": "0.3.0",
   "description": "A second model that peer-reviews every turn of your main pi agent and injects concise advice. Pick any model from your registry as the advisor.",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "author": "hazrid93",
   "license": "MIT",
   "repository": {
