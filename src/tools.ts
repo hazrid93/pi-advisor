@@ -14,9 +14,10 @@
  */
 
 import { Type } from "@earendil-works/pi-ai";
-import type { Api, Model, Tool } from "@earendil-works/pi-ai";
+import type { Api, Model, ThinkingLevel, Tool } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { execFile } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AdvisorSeverity } from "./index.js";
 
@@ -166,6 +167,18 @@ async function readExecute(args: Record<string, unknown>, cwd: string): Promise<
 		typeof args.limit === "number" && args.limit > 0 ? Math.floor(args.limit) : READ_DEFAULT_LIMIT;
 	try {
 		const abs = resolveReadonlyPath(path, cwd);
+		// G6b: sniff the first bytes to bail on binary files early — reading a
+		// large binary as utf8 and splitting it wastes work (grep is guarded by
+		// GREP_FILE_MAX_BYTES / ripgrep, but read wasn't).
+		const { fd, close } = await open(abs, "r").then((h) => ({ fd: h, close: () => h.close() })).catch(() => ({ fd: null, close: () => {} }));
+		if (fd) {
+			const buf = Buffer.alloc(8000);
+			const { bytesRead } = await fd.read(buf, 0, 8000, 0);
+			await close();
+			if (looksBinary(buf.subarray(0, bytesRead))) {
+				return { content: `read failed: file appears to be binary (${abs})`, isError: true };
+			}
+		}
 		const content = await readFile(abs, "utf8");
 		const lines = content.split("\n");
 		const sliced = lines.slice(offset - 1, offset - 1 + limit);
@@ -357,6 +370,21 @@ async function tryRipgrep(
 	});
 }
 
+/** Heuristic: a buffer is probably binary if it contains a NUL byte or the
+ *  ratio of non-text control bytes is high. Used to bail `read` early. */
+function looksBinary(buf: Buffer): boolean {
+	if (buf.length === 0) return false;
+	if (buf.includes(0)) return true;
+	let control = 0;
+	for (let i = 0; i < buf.length; i++) {
+		const b = buf[i];
+		// Allow tab (9), LF (10), CR (13); treat other control bytes < 32 as binary.
+		if (b < 32 && b !== 9 && b !== 10 && b !== 13) control++;
+		if (b === 127) control++;
+	}
+	return control / buf.length > 0.3;
+}
+
 function escapeRegex(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -375,14 +403,16 @@ function globToRegex(pattern: string): (s: string) => boolean {
 
 /** Resolve the reasoning level to pass to `complete()` for the advisor model,
  *  or undefined to leave thinking off. Mirrors pi core's guard: don't send a
- *  reasoning level to a non-reasoning model. */
+ *  reasoning level to a non-reasoning model, and don't send a level the model
+ *  marks unsupported via `thinkingLevelMap[level] === null` (G6). */
 export function resolveAdvisorReasoning(
 	model: Model<Api>,
 	thinking: boolean,
-	level: "minimal" | "low" | "medium" | "high" | "xhigh",
-): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+	level: ThinkingLevel,
+): ThinkingLevel | undefined {
 	if (!thinking) return undefined;
 	if (!model.reasoning) return undefined;
+	if (model.thinkingLevelMap?.[level as ModelThinkingLevel] === null) return undefined;
 	return level;
 }
 

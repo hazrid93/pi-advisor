@@ -52,7 +52,9 @@ describe("normalizeConfig", () => {
 
 	it("clamps bad numerics to defaults", () => {
 		const c = normalizeConfig({ contextEntries: -5, maxToolRounds: "nope" as unknown as number });
-		expect(c.contextEntries).toBe(DEFAULT_CONFIG.contextEntries);
+		// contextEntries is no longer on the interface (replaced by contextChars);
+		// an old -5 is silently swallowed and doesn't perturb contextChars.
+		expect(c.contextChars).toBe(DEFAULT_CONFIG.contextChars);
 		expect(c.maxToolRounds).toBe(DEFAULT_CONFIG.maxToolRounds);
 	});
 

@@ -82,6 +82,16 @@ describe("executeAdvisorTool: read", () => {
 		const r = await executeAdvisorTool("read", {}, cwd);
 		expect(r.isError).toBe(true);
 	});
+
+	it("bails on a binary file instead of decoding it as utf8 (G6b)", async () => {
+		const cwd = tmpProject();
+		// A GIF header + binary payload — must not be split as text.
+		const buf = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, ...new Array(2000).fill(0)]);
+		writeFileSync(join(cwd, "img.gif"), buf);
+		const r = await executeAdvisorTool("read", { path: "img.gif" }, cwd);
+		expect(r.isError).toBe(true);
+		expect(r.content).toContain("binary");
+	});
 });
 
 describe("executeAdvisorTool: find", () => {

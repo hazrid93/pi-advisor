@@ -1,119 +1,83 @@
 /**
- * Build the advisor's per-turn "Session update" from the session branch.
+ * Per-turn "Session update" for the advisor.
  *
- * oh-my-pi feeds the advisor only the transcript delta since the last review
- * (rendered with `formatSessionHistoryMarkdown`, thinking + tool calls + tool
- * results included). This extension can't reach pi's internal markdown
- * formatter, so it builds an equivalent view from the session branch using pi's
- * public `convertToLlm` + `serializeConversation` helpers (the same ones the
- * `handoff` example uses): it takes a bounded trailing window of entries, drops
- * the advisor's own injected `<advisory>` messages (so it never recursively
- * reviews its own advice), and serializes the result to text.
+ * Originally this built a bounded trailing window by diffing the session
+ * branch against a cursor (`getBranch()`). That had two problems: when more
+ * than the window's entries landed in one drain cycle it silently dropped the
+ * head (never reviewed), and it re-derived what the `turn_end` event already
+ * carries. The pi extension API hands `turn_end` a `message` + `toolResults`
+ * pair — one turn, bounded by construction — so we now serialize that payload
+ * directly (no branch diff, no cursor, no stale-cursor fallback).
  *
- * A bounded recent window (instead of the full transcript) keeps cost down and
- * avoids orphaned tool-result messages — a `toolResult` only makes sense paired
- * with its preceding assistant `toolCall`, and slicing a trailing window of
- * whole entries preserves those pairings as long as the window starts at an
- * entry boundary.
+ * A rolling buffer of recent per-turn deltas is kept by the runtime (not here)
+ * so the advisor keeps cross-turn context (replacing oh-my-pi's own append-only
+ * context, which the extension API can't reach).
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { Message } from "@earendil-works/pi-ai";
-import { ADVISOR_CUSTOM_TYPE } from "./index.js";
+import type { Message, ToolResultMessage } from "@earendil-works/pi-ai";
 
-/** Map a session entry to an AgentMessage the advisor can review. Compaction
- *  summaries become a synthetic compaction message so the advisor keeps context
- *  across a compact. Other non-conversational entries (model changes, labels,
- *  custom state) are skipped — they aren't part of the conversation. */
-function entryToMessage(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "message") return entry.message;
-	if (entry.type === "compaction") {
-		return {
-			role: "compactionSummary",
-			summary: entry.summary,
-			tokensBefore: entry.tokensBefore,
-			timestamp: new Date(entry.timestamp).getTime(),
-		} as unknown as AgentMessage;
-	}
-	return undefined;
-}
-
-/** Is this an entry the advisor itself injected? Filtered out of the review
- *  window so the advisor never reviews (and re-raises) its own advice. */
-function isAdvisorOwnEntry(entry: SessionEntry): boolean {
-	return (
-		(entry.type === "custom_message" || entry.type === "custom") &&
-		(entry as { customType?: string }).customType === ADVISOR_CUSTOM_TYPE
-	);
-}
-
-export interface DeltaResult {
-	/** The "### Session update\\n\\n<serialized>" text to send to the advisor, or
-	 *  null when there is nothing new to review. */
-	text: string | null;
-	/** The entry id the advisor should remember as its new cursor. */
-	lastSeenEntryId: string | null;
-}
-
-/**
- * Build the advisor's review text from the session branch.
- *
- * @param branch       The full current branch (ctx.sessionManager.getBranch()).
- * @param lastSeenId   The entry id the advisor last reviewed from, or null to
- *                     seed to the current leaf (review only new turns going
- *                     forward — mirrors oh-my-pi's mid-session seed).
- * @param windowEntries Max trailing entries to include.
- */
-export function buildAdvisorDelta(
-	branch: SessionEntry[],
-	lastSeenId: string | null,
-	windowEntries: number,
-): DeltaResult {
-	if (branch.length === 0) return { text: null, lastSeenEntryId: lastSeenId };
-
-	// Find where the advisor left off. If the cursor is stale (the branch was
-	// rewritten by compaction/fork), fall back to the whole branch window.
-	let startIndex = 0;
-	if (lastSeenId) {
-		const idx = branch.findIndex((e) => e.id === lastSeenId);
-		if (idx >= 0) startIndex = idx + 1;
-		else startIndex = 0; // cursor gone — re-prime from the bounded window
-	}
-
-	const slice = branch.slice(startIndex);
-	// Bound to the trailing window so cost stays predictable. Take the last N.
-	const bounded = slice.length > windowEntries ? slice.slice(slice.length - windowEntries) : slice;
-
-	// Drop the advisor's own injected messages.
-	const reviewed = bounded.filter((e) => !isAdvisorOwnEntry(e));
-	const messages = reviewed.map(entryToMessage).filter((m): m is AgentMessage => m !== undefined);
-
-	const lastEntry = bounded[bounded.length - 1] ?? null;
-
-	if (messages.length === 0) {
-		return { text: null, lastSeenEntryId: lastEntry?.id ?? lastSeenId };
-	}
-
-	let llmMessages: Message[];
+/** Serialize one turn's `turn_end` payload (`message` + its `toolResults`) to
+ *  the advisor-facing "Session update" body. Returns null when the turn had no
+ *  conversational content (e.g. an empty assistant message with no tool use). */
+export function serializeTurn(
+	message: AgentMessage,
+	toolResults: ToolResultMessage[],
+): string | null {
+	const msgs: AgentMessage[] = [message, ...toolResults];
+	let llm: Message[];
 	try {
-		llmMessages = convertToLlm(messages);
+		llm = convertToLlm(msgs);
 	} catch {
 		// convertToLlm can throw on malformed custom messages; fall back to a
-		// best-effort text dump so the advisor still gets something to review.
-		llmMessages = messages
-			.filter((m): m is Message => "role" in m && (m.role === "user" || m.role === "assistant" || m.role === "toolResult"))
-			.map((m) => m as Message);
+		// best-effort text dump of the standard roles so the advisor still gets
+		// something to review.
+		llm = msgs.filter(
+			(m): m is Message =>
+				"role" in m && (m.role === "user" || m.role === "assistant" || m.role === "toolResult"),
+		);
 	}
+	const serialized = serializeConversation(llm).trim();
+	return serialized || null;
+}
 
-	const serialized = serializeConversation(llmMessages).trim();
-	if (!serialized) {
-		return { text: null, lastSeenEntryId: lastEntry?.id ?? lastSeenId };
+/** Wrap a serialized turn with the "### Session update" header the advisor
+ *  expects, optionally prefixed with a recent-advice preamble (so the advisor
+ *  can honor "NEVER repeat advice you already gave" — passed in by the runtime
+ *  only when delivery-time dedupe did NOT fire). */
+export function buildSessionUpdate(serializedTurn: string, preamble?: string): string {
+	const header = preamble ? `${preamble}\n\n` : "";
+	return `${header}### Session update\n\n${serializedTurn}`;
+}
+
+/** Extract the last conversational turn (assistant message + its trailing
+ *  toolResults) from a session branch. Used by `/advisor review` to feed the
+ *  same per-turn payload shape `turn_end` provides, without the event. Returns
+ *  null if the branch has no assistant message. */
+export function lastTurnFromBranch(
+	branch: ReadonlyArray<SessionEntry>,
+): { message: AgentMessage; toolResults: ToolResultMessage[] } | null {
+	// Walk from the leaf backwards: collect trailing toolResults, then the
+	// first assistant message above them is this turn's message.
+	let i = branch.length - 1;
+	const toolResults: ToolResultMessage[] = [];
+	while (i >= 0) {
+		const e = branch[i];
+		if (e.type === "message" && e.message.role === "toolResult") {
+			toolResults.unshift(e.message as ToolResultMessage);
+			i--;
+			continue;
+		}
+		break;
 	}
-
-	return {
-		text: `### Session update\n\n${serialized}`,
-		lastSeenEntryId: lastEntry?.id ?? lastSeenId,
-	};
+	while (i >= 0) {
+		const e = branch[i];
+		if (e.type === "message" && e.message.role === "assistant") {
+			return { message: e.message, toolResults };
+		}
+		i--;
+	}
+	return null;
 }

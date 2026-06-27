@@ -25,6 +25,7 @@ import type {
 	Message,
 	Model,
 	TextContent,
+	ThinkingLevel,
 	ToolCall,
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
@@ -47,24 +48,16 @@ export type AdvisorComplete = (
 	options?: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal; reasoning?: string },
 ) => Promise<AssistantMessage>;
 
-/** Dependencies the loop needs from the host (held by the runtime). */
-export interface AdvisorLoopDeps {
-	/** Resolve the advisor model from the configured "provider/id" ref. */
-	resolveModel(ref: string): Model<Api> | undefined;
-	/** Resolve auth (api key + headers) for the advisor model. */
-	getApiKeyAndHeaders(model: Model<Api>): Promise<
-		{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }
-	>;
-	/** The advisor's working directory (the session cwd) — confines read/grep/find. */
-	cwd: string;
-	/** Abort signal for the in-flight review (the turn's signal, or a local one). */
-	signal?: AbortSignal;
+/** Loop config that doesn't vary per turn: thinking, round cap, system prompt,
+ *  usage sink. The per-turn bits (model, auth, cwd, signal) are positional args
+ *  to {@link runAdvisorReview} so they're frozen at queue time (B3). */
+export interface AdvisorReviewConfig {
 	/** Max read-only tool rounds before the advisor must `advise` or yield. */
 	maxToolRounds: number;
 	/** Whether the advisor model should reason before reviewing. */
 	thinking: boolean;
 	/** Thinking effort when `thinking` is on. */
-	thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinkingLevel: ThinkingLevel;
 	/** Override the system prompt (otherwise the built-in advisor prompt). */
 	systemPrompt?: string;
 	/** Optional sink for advisor model usage (tokens/cost) for /advisor status. */
@@ -86,31 +79,27 @@ export interface AdvisorReviewResult {
 /** Hard cap on total loop iterations even if maxToolRounds is set very high. */
 const ABSOLUTE_MAX_ROUNDS = 12;
 
-/** Run one advisor review. Returns the captured advice (or null for silence). */
+/** Run one advisor review. Returns the captured advice (or null for silence).
+ *
+ *  Per-turn inputs (model, auth, cwd, signal) are positional so they're frozen
+ *  at queue time (B3); everything else rides in `config`. */
 export async function runAdvisorReview(
 	sessionUpdate: string,
-	advisorModelRef: string,
-	deps: AdvisorLoopDeps,
+	model: Model<Api>,
+	auth: { apiKey?: string; headers?: Record<string, string> },
+	cwd: string,
+	signal: AbortSignal,
+	config: AdvisorReviewConfig,
 ): Promise<AdvisorReviewResult> {
-	const model = deps.resolveModel(advisorModelRef);
-	if (!model) {
-		return { advise: null, rounds: 0, error: `Advisor model not found: ${advisorModelRef}` };
+	if (!auth.apiKey) {
+		return { advise: null, rounds: 0, error: "No API key for advisor model" };
 	}
 
-	const auth = await deps.getApiKeyAndHeaders(model);
-	if (!auth.ok || !auth.apiKey) {
-		return {
-			advise: null,
-			rounds: 0,
-			error: !auth.ok ? auth.error : `No API key for advisor model ${advisorModelRef}`,
-		};
-	}
-
-	const systemPrompt = deps.systemPrompt ?? ADVISOR_SYSTEM_PROMPT;
+	const systemPrompt = config.systemPrompt ?? ADVISOR_SYSTEM_PROMPT;
 	const tools = advisorTools();
-	const reasoning = resolveAdvisorReasoning(model, deps.thinking, deps.thinkingLevel);
-	const complete = deps.complete ?? completeSimple;
-	const maxRounds = Math.min(deps.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
+	const reasoning = resolveAdvisorReasoning(model, config.thinking, config.thinkingLevel);
+	const complete = config.complete ?? completeSimple;
+	const maxRounds = Math.min(config.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
 
 	const messages: Message[] = [
 		{ role: "user", content: sessionUpdate, timestamp: Date.now() },
@@ -120,7 +109,7 @@ export async function runAdvisorReview(
 	let advise: AdviseCapture | null = null;
 
 	while (rounds <= maxRounds) {
-		if (deps.signal?.aborted) {
+		if (signal.aborted) {
 			return { advise: null, rounds, error: "aborted" };
 		}
 
@@ -132,7 +121,7 @@ export async function runAdvisorReview(
 				{
 					apiKey: auth.apiKey,
 					headers: auth.headers,
-					signal: deps.signal,
+					signal,
 					reasoning,
 				},
 			);
@@ -140,12 +129,12 @@ export async function runAdvisorReview(
 			const message = err instanceof Error ? err.message : String(err);
 			// An abort surfaces as an error here; classify it so the runtime
 			// doesn't retry a deliberate cancel.
-			if (deps.signal?.aborted) return { advise: null, rounds, error: "aborted" };
+			if (signal.aborted) return { advise: null, rounds, error: "aborted" };
 			return { advise: null, rounds, error: message };
 		}
 
 		try {
-			deps.onUsage?.(response.usage, model);
+			config.onUsage?.(response.usage, model);
 		} catch {
 			// never let usage reporting break a review
 		}
@@ -168,7 +157,7 @@ export async function runAdvisorReview(
 		// messages for the next round.
 		let capturedThisRound: AdviseCapture | null = null;
 		for (const call of toolCalls) {
-			if (deps.signal?.aborted) return { advise: null, rounds, error: "aborted" };
+			if (signal.aborted) return { advise: null, rounds, error: "aborted" };
 
 			if (call.name === "advise") {
 				const args = (call.arguments ?? {}) as Record<string, unknown>;
@@ -189,7 +178,7 @@ export async function runAdvisorReview(
 				continue;
 			}
 
-			const result = await executeAdvisorTool(call.name, (call.arguments ?? {}) as Record<string, unknown>, deps.cwd);
+			const result = await executeAdvisorTool(call.name, (call.arguments ?? {}) as Record<string, unknown>, cwd);
 			messages.push(toolResult(call, result.content, result.isError === true));
 		}
 

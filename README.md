@@ -128,9 +128,9 @@ This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) po
 | `src/index.ts` | **Config/types** | Config schema + persistence (`~/.pi/agent/extensions/pi-advisor.json`), `provider/id` parsing, severity type, and the `<advisory>` framing (`formatAdvisorBatchContent`, `escapeXmlText`). No pi imports beyond `getAgentDir`. |
 | `src/prompts.ts` | **Prompt** | The advisor system prompt and `advise` tool description — **ported verbatim from oh-my-pi** (`prompts/advisor/system.md` + `advise-tool.md`). Defines the reviewer role: peer-programmer, not a second executor; can only read + advise. |
 | `src/tools.ts` | **Tools** | The advisor's hard-isolated read-only toolset: `read`, `grep`, `find` (re-implemented against the filesystem, read-only by construction — there is no write/edit capability at all — and confined to the project root) plus the `advise` tool that captures a note + severity. |
-| `src/transcript.ts` | **Context** | Builds the per-turn "Session update": slices the branch from the advisor's cursor, bounds it to `contextEntries`, filters out the advisor's own `<advisory>` entries (so it never reviews itself), and serializes via pi's public `convertToLlm` + `serializeConversation`. |
+| `src/transcript.ts` | **Context** | Serializes each turn's `turn_end` payload (`message` + `toolResults`) as the advisor's "Session update" via pi's public `convertToLlm` + `serializeConversation`, and exposes `lastTurnFromBranch` for `/advisor review`. No branch diff, cursor, or window — one turn is bounded by construction. |
 | `src/agent.ts` | **Loop** | `runAdvisorReview()` — the advisor agent loop with pi-ai's `completeSimple()`: prompt → tool calls → execute read-only tools locally → capture `advise` → loop until `advise`/silence/round cap. Uses `/compat` so `reasoning`/thinking is honoured. |
-| `src/runtime.ts` | **Runtime** | `AdvisorRuntime` — the discipline ported from oh-my-pi: backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding, and `nit`→steer / `concern`→steer+triggerTurn delivery via `pi.sendMessage`. |
+| `src/runtime.ts` | **Runtime** | `AdvisorRuntime` — the discipline ported from oh-my-pi: backlog queue, single-flight `busy` guard, `epoch` counter (bumped on reset/dispose/compact/tree-nav), 3-strike failure drop, a rolling char-bounded context buffer, delivery-time advice dedupe (B5), abortable backoff (B2), and `nit`→steer / `concern`→steer+triggerTurn delivery via `pi.sendMessage`. |
 
 ### What's ported from oh-my-pi
 
@@ -140,7 +140,7 @@ This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) po
 | `advisor/advise-tool.ts` — `nit` / `concern` / `blocker` severities, `<advisory guidance="weigh, don't blindly obey">` framing, severity-rank dedupe | `src/index.ts` + `src/tools.ts` (`advise` tool + `formatAdvisorBatchContent`) |
 | `prompts/advisor/system.md` + `advise-tool.md` — the reviewer role definition | `src/prompts.ts` (ported verbatim) |
 | hard-isolated read-only toolset (`read` / `search` / `find`) on a distinct `ToolSession` | `src/tools.ts` — re-implemented `read` / `grep` / `find` against the filesystem, read-only by construction, confined to the project root |
-| per-turn transcript delta via `formatSessionHistoryMarkdown`, advisor's own notes filtered out | `src/transcript.ts` — bounded trailing window via pi's public `convertToLlm` + `serializeConversation`, `<advisory>` entries filtered out |
+| per-turn transcript delta via `formatSessionHistoryMarkdown`, advisor's own notes filtered out | `src/transcript.ts` — the `turn_end` event payload (`message` + `toolResults`) serialized via pi's public `convertToLlm` + `serializeConversation`; a rolling char-bounded buffer in the runtime keeps cross-turn context; a hard delivery-time dedupe plus a recent-advice preamble prevent the advisor re-raising its own notes (B5). |
 | `nit` non-interrupting aside vs `concern`/`blocker` interrupting steer | `src/runtime.ts` `deliveryOptions()` → pi's `sendMessage` `deliverAs: "steer"` + `triggerTurn` |
 | `advisor.immuneTurns` / `syncBacklog` | not ported — pi's extension API doesn't expose the steering/yield internals those tune; reviews are fire-and-forget from `turn_end` instead |
 
@@ -148,7 +148,8 @@ This is the [pi extension](https://github.com/earendil-works/pi-coding-agent) po
 
 - **No second `Agent`.** oh-my-pi's advisor is a full `Agent` with its own append-only context, telemetry, and tool loop. The public pi extension API doesn't expose `Agent`, so the advisor loop is reimplemented with pi-ai's `completeSimple()` (`src/agent.ts`): prompt → tool calls → execute read-only tools locally → capture `advise` → loop until advise/silence/round cap.
 - **`completeSimple`, not `complete`.** The `reasoning`/thinking option is only honoured on the `streamSimple` path; the plain `stream` path ignores it. Importing `completeSimple` from `@earendil-works/pi-ai/compat`.
-- **Bounded recent window, not a byte-delta.** oh-my-pi feeds only the per-turn delta (rendered with its internal markdown formatter). This extension can't reach that formatter, so it sends a bounded trailing transcript window via pi's public `convertToLlm` + `serializeConversation` — the same helpers pi's own `handoff` example uses. Slicing whole entries keeps assistant/toolCall + toolResult pairs intact.
+- **Event payload + rolling buffer, not a branch diff.** Each `turn_end` hands the advisor that turn's `message` + `toolResults` (one turn, bounded by construction — no silent head-drop when many entries land in one cycle). A rolling char-bounded buffer in the runtime keeps the advisor's cross-turn context, replacing oh-my-pi's own append-only context (which the extension API can't reach). No cursor or stale-cursor fallback to maintain.
+- **Repeat guard (B5).** The advisor can't see its own prior advice, so a hard delivery-time dedupe (normalized key over recently-delivered notes) prevents repeats, and a compact "recent advice" preamble injected into the session-update header gives the model awareness — only when dedupe didn't fire, so it never re-anchors on its own filtered output.
 - **Fire-and-forget reviews.** A review kicked from `turn_end` runs in the background and never blocks the main agent; advice lands via `pi.sendMessage` when ready. (oh-my-pi's `syncBacklog` pause-the-agent modes aren't reproducible without access to the steering/yield internals.)
 - **Read-only tools re-implemented, not shared.** oh-my-pi builds its read/search/find against a distinct `ToolSession`. The extension API can't create a second tool session, so the read-only primitives are re-implemented directly against the filesystem — they are read-only by construction (no write/edit code path exists) and confined to the project root (paths escaping via `..` are rejected).
 
@@ -406,9 +407,11 @@ Created automatically at `~/.pi/agent/extensions/pi-advisor.json` on first chang
   "advisorModel": "anthropic/claude-sonnet-4-5",
   "thinking": false,
   "thinkingLevel": "medium",
-  "contextEntries": 30,
+  "contextChars": 12000,
+  "cooldownMs": 0,
   "maxToolRounds": 6,
   "maxRetries": 3,
+  "interrupting": true,
   "systemPrompt": null
 }
 ```
@@ -419,7 +422,9 @@ Created automatically at `~/.pi/agent/extensions/pi-advisor.json` on first chang
 | `advisorModel` | `null` | The advisor, as `provider/id`. `null` = not configured (advisor inactive). |
 | `thinking` | `false` | Whether the advisor reasons before reviewing. Adds latency + cost; off by default. |
 | `thinkingLevel` | `"medium"` | Thinking effort when `thinking` is on (only honoured if the advisor model declares `reasoning: true`). |
-| `contextEntries` | `30` | How many trailing session entries to feed the advisor as context each turn. Bounded for cost + pairing safety. |
+| `contextChars` | `12000` | Approximate char budget for the advisor's rolling context buffer of recent per-turn deltas. The oldest turn is evicted when exceeded, so cost stays bounded while the advisor keeps cross-turn context. (Replaces the old `contextEntries` count, which is still accepted from old config for back-compat.) |
+| `cooldownMs` | `0` | Minimum gap (ms) between reviews. `0` = review every `turn_end`. Set higher to throttle cost on a busy agent; turns inside the cooldown are coalesced into the next review, not dropped. |
+| `interrupting` | `true` | When `true`, ALL advice (including `nit`) triggers a new agent turn immediately. When `false`, only `concern`/`blocker` interrupt; `nit` lands non-interruptingly. A hard delivery-time dedupe guards against repeat-feedback loops either way. |
 | `maxToolRounds` | `6` | Max read-only tool rounds per review before the advisor must `advise` or yield. Hard-capped at 12. |
 | `maxRetries` | `3` | Max attempts to retry a failed review before dropping the backlog (mirrors oh-my-pi's 3-strike drop so a broken model never stalls the session). |
 | `systemPrompt` | _(built-in)_ | Override the advisor system prompt. |

@@ -37,71 +37,57 @@ import {
 	writeConfig,
 	type AdvisorConfig,
 } from "./src/index.js";
-import { AdvisorRuntime, makeHost, summarizeResult } from "./src/runtime.js";
+import { AdvisorRuntime, makeHost, summarizeResult, type AdvisorRuntimeHost } from "./src/runtime.js";
+import { lastTurnFromBranch } from "./src/transcript.js";
 
 let config: AdvisorConfig = readConfig();
 let runtime: AdvisorRuntime | null = null;
 
-/** The full host wiring the runtime drives: transcript access, model/auth
- *  resolution, advice delivery, and user notification. */
-function buildHost(pi: ExtensionAPI, ctxForBranch: () => ExtensionContext | null) {
-	return {
-		...makeHost(pi, () => config.interrupting),
-		getBranch: () => ctxForBranch()?.sessionManager.getBranch() ?? [],
-		resolveModel: (ref: string) => {
-			const parsed = parseModelRef(ref);
-			if (!parsed) return undefined;
-			const c = ctxForBranch();
-			return c?.modelRegistry.find(parsed.provider, parsed.id);
-		},
-		getApiKeyAndHeaders: async (model: Model<Api>) => {
-			const c = ctxForBranch();
-			if (!c) return { ok: false as const, error: "no session context" };
-			return c.modelRegistry.getApiKeyAndHeaders(model);
-		},
-		notify: (message: string, type?: "info" | "warning" | "error") => {
-			ctxForBranch()?.ui.notify(`pi-advisor: ${message}`, type);
-		},
-	};
+/** Lazily create the runtime on first use (turn_end or command). The host only
+ *  needs `pi.sendMessage` (advice delivery); per-turn model/auth resolution
+ *  rides in the onTurnEnd/reviewNow ctx, so no stale-ctx closure is held. */
+function buildHost(pi: ExtensionAPI): AdvisorRuntimeHost {
+	return makeHost(pi, () => config.interrupting);
 }
 
-/** Lazily create the runtime on first use (turn_end or command). Created late
- *  so `ctxForBranch` can resolve a live ExtensionContext. */
-function ensureRuntime(pi: ExtensionAPI, ctxForBranch: () => ExtensionContext | null): AdvisorRuntime {
+/** Lazily create the runtime on first use (turn_end or command). */
+function ensureRuntime(pi: ExtensionAPI): AdvisorRuntime {
 	if (runtime && !runtime.disposed) return runtime;
-	runtime = new AdvisorRuntime(buildHost(pi, ctxForBranch), config);
+	runtime = new AdvisorRuntime(buildHost(pi), config);
 	return runtime;
 }
 
 export default function (pi: ExtensionAPI) {
 	config = readConfig();
 
-	// The most recent event context. Event handlers fire sequentially per turn,
-	// so capturing the latest ctx gives the runtime a live modelRegistry /
-	// sessionManager / cwd for background reviews kicked from turn_end. This is
-	// rebuilt on every event; the runtime only reads it when it runs a review.
-	let latestCtx: ExtensionContext | null = null;
-	const ctxForBranch = () => latestCtx;
-
 	pi.on("session_start", async (_event, ctx) => {
-		latestCtx = ctx;
 		// Pick up config changes made from another session/window.
-		const next = readConfig();
-		Object.assign(config, next);
-		// Re-prime and seed to the current leaf so the advisor only reviews new
-		// turns going forward (oh-my-pi's mid-session seed).
-		const rt = ensureRuntime(pi, ctxForBranch);
+		Object.assign(config, readConfig());
+		// Re-prime: drop any in-flight review and clear the rolling context buffer
+		// so the advisor only reviews new turns going forward.
+		const rt = ensureRuntime(pi);
 		rt.reset();
-		rt.setCwd(ctx.cwd);
-		rt.seedToLeaf(ctx.sessionManager.getBranch());
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
-		latestCtx = ctx;
+	pi.on("turn_end", async (event, ctx) => {
 		if (!config.enabled || !config.advisorModel) return;
-		const rt = ensureRuntime(pi, ctxForBranch);
-		rt.setCwd(ctx.cwd);
-		rt.onTurnEnd(ctx.sessionManager.getBranch());
+		const rt = ensureRuntime(pi);
+		void rt.onTurnEnd(event.message, event.toolResults, ctx.sessionManager.getBranch(), {
+			signal: ctx.signal,
+			cwd: ctx.cwd,
+			modelRegistry: ctx.modelRegistry,
+			getApiKeyAndHeaders: (m) => ctx.modelRegistry.getApiKeyAndHeaders(m),
+		});
+	});
+
+	// G2: compaction and tree navigation rewrite the branch. Bump the epoch so any
+	// in-flight review is dropped instead of landing stale against the new
+	// conversation, and clear the rolling context buffer.
+	pi.on("session_compact", async () => {
+		runtime?.reset();
+	});
+	pi.on("session_tree", async () => {
+		runtime?.reset();
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -117,7 +103,7 @@ export default function (pi: ExtensionAPI) {
 			return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
 		},
 		handler: async (args, ctx) => {
-			await handleAdvisorCommand(pi, ctx, args.trim(), ctxForBranch);
+			await handleAdvisorCommand(pi, ctx, args.trim());
 		},
 	});
 }
@@ -126,7 +112,6 @@ async function handleAdvisorCommand(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	args: string,
-	ctxForBranch: () => ExtensionContext | null,
 ): Promise<void> {
 	const parts = args.split(/\s+/);
 	const sub = parts[0]?.toLowerCase() ?? "";
@@ -153,7 +138,7 @@ async function handleAdvisorCommand(
 				"  /advisor help          This message",
 				"",
 				"Config: ~/.pi/agent/extensions/pi-advisor.json",
-				"Advice is delivered as <advisory severity=...> notes: nit (non-interrupting when",,
+				"Advice is delivered as <advisory severity=...> notes: nit (non-interrupting when",
 				"interrupting is off), concern/blocker (always interrupting).",
 			].join("\n"),
 			"info",
@@ -215,10 +200,19 @@ async function handleAdvisorCommand(
 			ctx.ui.notify("Advisor is not active. Pick a model with /advisor first.", "warning");
 			return;
 		}
-		const rt = ensureRuntime(pi, ctxForBranch);
-		rt.setCwd(ctx.cwd);
+		const rt = ensureRuntime(pi);
+		const turn = lastTurnFromBranch(ctx.sessionManager.getBranch());
+		if (!turn) {
+			ctx.ui.notify("Nothing to review yet.", "info");
+			return;
+		}
 		ctx.ui.notify("Reviewing recent transcript…", "info");
-		const result = await rt.reviewNow(ctx.sessionManager.getBranch());
+		const result = await rt.reviewNow(turn.message, turn.toolResults, {
+			signal: ctx.signal,
+			cwd: ctx.cwd,
+			modelRegistry: ctx.modelRegistry,
+			getApiKeyAndHeaders: (m) => ctx.modelRegistry.getApiKeyAndHeaders(m),
+		});
 		ctx.ui.notify(summarizeResult(result), result?.error ? "warning" : "info");
 		return;
 	}
@@ -361,7 +355,7 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	lines.push(`Advisor: ${config.enabled ? "enabled" : "disabled"}`);
 	lines.push(`Advisor model: ${config.advisorModel ?? "(none — pick one with /advisor)"}`);
 	lines.push(`Thinking: ${config.thinking ? `on (${config.thinkingLevel})` : "off"}`);
-	lines.push(`Context window: last ${config.contextEntries} entries · max ${config.maxToolRounds} tool rounds`);
+	lines.push(`Context window: ~${config.contextChars} chars · max ${config.maxToolRounds} tool rounds${config.cooldownMs > 0 ? ` · cooldown ${config.cooldownMs}ms` : ""}`);
 	lines.push(`Delivery: ${config.interrupting ? "ALL advice interrupts" : "nit → non-interrupting, concern/blocker → interrupting"} (steer${config.interrupting ? " + triggerTurn" : " + triggerTurn for concern/blocker"})`);
 
 	const active = config.enabled && !!config.advisorModel;

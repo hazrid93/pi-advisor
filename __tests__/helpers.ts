@@ -1,5 +1,9 @@
 /**
  * Test helpers: a scriptable fake `complete` (no network) + minimal fixtures.
+ *
+ * Updated for the per-turn `runAdvisorReview(sessionUpdate, model, auth, cwd,
+ * signal, config)` signature: `fakeDeps` now returns a `{ model, auth, cwd,
+ * signal, config }` tuple the loop expects.
  */
 
 import type {
@@ -10,6 +14,7 @@ import type {
 	ToolCall,
 } from "@earendil-works/pi-ai";
 import type { AdvisorComplete } from "../src/agent.js";
+import type { AdvisorReviewConfig } from "../src/agent.js";
 
 /** A minimal advisor-capable model fixture. */
 export function fakeModel(overrides: Partial<Model<Api>> = {}): Model<Api> {
@@ -103,8 +108,18 @@ export function scriptableComplete(
 	return fn as AdvisorComplete & { calls: typeof calls };
 }
 
-/** Build the loop deps wired to a fake model + scriptable complete. */
-export function fakeDeps(
+/** The per-turn args + config for `runAdvisorReview`, wired to a fake model +
+ *  scriptable complete. Mirrors how the runtime calls the loop. */
+export interface FakeTurnArgs {
+	model: Model<Api>;
+	auth: { apiKey?: string; headers?: Record<string, string> };
+	cwd: string;
+	signal: AbortSignal;
+	config: AdvisorReviewConfig;
+}
+
+/** Build per-turn args + config wired to a fake model + scriptable complete. */
+export function fakeTurn(
 	model: Model<Api>,
 	complete: AdvisorComplete,
 	overrides: {
@@ -114,17 +129,19 @@ export function fakeDeps(
 		thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
 		systemPrompt?: string;
 	} = {},
-) {
+): FakeTurnArgs {
 	const cwd = overrides.cwd ?? "/tmp";
 	return {
-		resolveModel: () => model,
-		getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "fake-key", headers: {} }),
+		model,
+		auth: { apiKey: "fake-key", headers: {} },
 		cwd,
-		signal: undefined,
-		maxToolRounds: overrides.maxToolRounds ?? 6,
-		thinking: overrides.thinking ?? false,
-		thinkingLevel: overrides.thinkingLevel ?? "medium",
-		systemPrompt: overrides.systemPrompt,
-		complete,
+		signal: new AbortController().signal,
+		config: {
+			maxToolRounds: overrides.maxToolRounds ?? 6,
+			thinking: overrides.thinking ?? false,
+			thinkingLevel: overrides.thinkingLevel ?? "medium",
+			systemPrompt: overrides.systemPrompt,
+			complete,
+		},
 	};
 }

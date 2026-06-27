@@ -41,10 +41,33 @@ export interface AdvisorMessageDetails {
 	model: string;
 }
 
-/** The customType this extension injects into the session transcript. Filtering
- *  entries with this customType out of the advisor's own review window stops the
- *  advisor from recursively reviewing its own advice (oh-my-pi does the same). */
+/** The customType this extension injects into the session transcript. */
 export const ADVISOR_CUSTOM_TYPE = "advisor";
+
+/** How many recently-delivered advisor notes to remember for delivery-time
+ *  dedupe (B5: the advisor can't see its own prior advice since those entries
+ *  are filtered, so a hard dedupe guard prevents the repeat-feedback loop). */
+export const RECENT_ADVICE_LIMIT = 12;
+
+/** Normalize an advisory note to a stable dedupe key. Lowercases and collapses
+ *  whitespace so paraphrased repeats still match. A length suffix is appended so
+ *  two distinct long notes sharing a prefix aren't silently merged by the 240-char
+ *  truncation. Trades precision for recall: a false collision just suppresses a
+ *  near-duplicate (fine); a false miss falls back to the ring-buffer awareness layer. */
+export function adviceKey(note: string): string {
+	const normalized = note.trim().toLowerCase().replace(/\s+/g, " ");
+	return `${normalized.slice(0, 240)}#${normalized.length}`;
+}
+
+/** Render a compact preamble of recently-given advice, injected into the
+ *  session-update header so the advisor can honor "NEVER repeat advice you
+ *  already gave". Only injected when delivery-time dedupe did NOT fire, so the
+ *  advisor never reads and re-anchors on its own (already-filtered) output. */
+export function formatRecentAdvicePreamble(notes: readonly AdvisorNote[]): string {
+	if (notes.length === 0) return "";
+	const lines = notes.map((n) => `[${n.severity ?? "nit"}] ${n.note.slice(0, 140)}`);
+	return `<recent_advice already_given do_not_repeat>\n${lines.join("\n")}\n</recent_advice>`;
+}
 
 /** Behavioral framing carried as a tag attribute so the agent-facing output
  *  stays a clean `<advisory>` block. The primary agent's system prompt never
@@ -95,14 +118,15 @@ export interface AdvisorConfig {
 	thinking: boolean;
 	/** Thinking effort when `thinking` is on. */
 	thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh";
-	/**
-	 * How many trailing session entries to feed the advisor as context each turn.
-	 * A bounded recent window (instead of the full transcript) keeps cost down and
-	 * avoids orphaned tool-result messages (a toolResult needs its preceding
-	 * assistant toolCall to make sense). oh-my-pi sends only the per-turn delta;
-	 * this extension sends a bounded recent window for the same effect with
-	 * simpler, pairing-safe slicing. */
-	contextEntries: number;
+	/** Approximate char budget for the advisor's rolling context buffer of recent
+	 *  per-turn deltas. The oldest turn is evicted when exceeded, so cost stays
+	 *  bounded while the advisor keeps cross-turn context (replacing oh-my-pi's
+	 *  own append-only context, which the extension API can't reach). */
+	contextChars: number;
+	/** Minimum gap (ms) between advisor reviews. 0 = review every turn_end (the
+	 *  default). Set higher to throttle cost on a busy agent: turns arriving
+	 *  inside the cooldown are coalesced into the next eligible review, not dropped. */
+	cooldownMs: number;
 	/** Max read-only tool rounds the advisor may take per review before it must
 	 *  call `advise` or yield. Guards against a runaway advisor loop. */
 	maxToolRounds: number;
@@ -124,7 +148,8 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	advisorModel: null,
 	thinking: false,
 	thinkingLevel: "medium",
-	contextEntries: 30,
+	contextChars: 12_000,
+	cooldownMs: 0,
 	maxToolRounds: 6,
 	maxRetries: 3,
 	interrupting: true,
@@ -166,12 +191,21 @@ export function normalizeConfig(raw: unknown): AdvisorConfig {
 	}
 	if (typeof obj.thinking === "boolean") base.thinking = obj.thinking;
 	if (isThinkingLevel(obj.thinkingLevel)) base.thinkingLevel = obj.thinkingLevel;
+	// `contextEntries` is silently accepted from old config files for
+	// back-compat but no longer read (replaced by contextChars). Swallow it here.
 	if (
-		typeof obj.contextEntries === "number" &&
-		Number.isFinite(obj.contextEntries) &&
-		obj.contextEntries >= 1
+		typeof obj.contextChars === "number" &&
+		Number.isFinite(obj.contextChars) &&
+		obj.contextChars >= 512
 	) {
-		base.contextEntries = Math.floor(obj.contextEntries);
+		base.contextChars = Math.floor(obj.contextChars);
+	}
+	if (
+		typeof obj.cooldownMs === "number" &&
+		Number.isFinite(obj.cooldownMs) &&
+		obj.cooldownMs >= 0
+	) {
+		base.cooldownMs = Math.floor(obj.cooldownMs);
 	}
 	if (
 		typeof obj.maxToolRounds === "number" &&
