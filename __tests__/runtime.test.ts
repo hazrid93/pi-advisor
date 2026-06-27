@@ -14,6 +14,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { ADVISOR_CUSTOM_TYPE } from "../src/index.js";
 import type { AdvisorReviewResult } from "../src/agent.js";
+import type { AdvisorNote } from "../src/index.js";
 
 let idCounter = 0;
 function entry(role: "user" | "assistant", text: string): SessionEntry {
@@ -98,7 +99,7 @@ function makeRuntime(
 	branch: SessionEntry[] = [],
 	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; cooldownMs: number }> = {},
 ) {
-	const sendAdvice = vi.fn(async () => {});
+	const sendAdvice = vi.fn(async (_notes: AdvisorNote[], _model: string) => {});
 	const host = { sendAdvice };
 	const rt = new AdvisorRuntime(
 		host as never,
@@ -156,7 +157,8 @@ describe("AdvisorRuntime — happy path", () => {
 		void rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [entry("user", "do the thing")], ctx);
 		await settle(rt);
 		expect(sendAdvice).toHaveBeenCalledTimes(1);
-		expect((sendAdvice.mock.calls[0] as unknown[])[0]).toEqual([{ note: "watch the queue", severity: "concern" }]);
+		expect(sendAdvice.mock.calls[0][0]).toEqual([{ note: "watch the queue", severity: "concern" }]);
+		expect(sendAdvice.mock.calls[0][1]).toBe("fake/fake");
 		expect(rt.lastResult?.advise?.note).toBe("watch the queue");
 		expect(rt.isBusy).toBe(false);
 	});
