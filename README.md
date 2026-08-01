@@ -4,11 +4,15 @@
 
 **A second model that reviews your main [pi](https://github.com/earendil-works/pi-coding-agent) agent and injects concise, actionable advice.**
 
-[![pi extension](https://img.shields.io/badge/pi-extension-blueviolet)](https://github.com/earendil-works/pi-coding-agent)
+[![npm version](https://img.shields.io/npm/v/%40hazrid1993%2Fpi-advisor?logo=npm&label=npm)](https://www.npmjs.com/package/@hazrid1993/pi-advisor)
+[![Pi package](https://img.shields.io/badge/Pi-package_catalog-8A2BE2)](https://pi.dev/packages/@hazrid1993/pi-advisor)
 [![pi 0.80+](https://img.shields.io/badge/pi-%3E%3D0.80-8A2BE2)](https://github.com/earendil-works/pi-coding-agent)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 </div>
+
+> [!NOTE]
+> **Official release:** [`@hazrid1993/pi-advisor`](https://www.npmjs.com/package/@hazrid1993/pi-advisor) is published on npm and listed in the [Pi package catalog](https://pi.dev/packages/@hazrid1993/pi-advisor).
 
 ## What it does
 
@@ -28,7 +32,7 @@ Advice is framed as guidance for the main agent to weigh—not blindly obey.
 
 ### Install
 
-Install the published npm package:
+Install the official package from npm:
 
 ```bash
 pi install npm:@hazrid1993/pi-advisor
