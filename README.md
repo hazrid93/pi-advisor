@@ -28,8 +28,10 @@ Advice is framed as guidance for the main agent to weigh—not blindly obey.
 
 ### Install
 
+Install the published npm package:
+
 ```bash
-pi install https://github.com/hazrid93/pi-advisor
+pi install npm:@hazrid1993/pi-advisor
 ```
 
 Then restart pi or run:
@@ -38,7 +40,7 @@ Then restart pi or run:
 /reload
 ```
 
-Other accepted package forms:
+To install directly from the source repository instead:
 
 ```bash
 pi install git:github.com/hazrid93/pi-advisor
@@ -322,7 +324,7 @@ The queue is single-flight, so advisor reviews never overlap. Epoch guards disca
 
 ## Development
 
-Validated against `@earendil-works/pi-*` **0.80.7**.
+Validated against `@earendil-works/pi-*` **0.83.0**.
 
 ```bash
 npm install
@@ -335,7 +337,7 @@ The test suite uses fake completions and requires no API key.
 ## Uninstall
 
 ```bash
-pi uninstall git:github.com/hazrid93/pi-advisor
+pi uninstall npm:@hazrid1993/pi-advisor
 ```
 
 Optionally remove global configuration:
