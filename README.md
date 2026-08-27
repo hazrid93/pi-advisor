@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧭 pi-advisor
+# pi-advisor
 
 **A second model that reviews your main [pi](https://github.com/earendil-works/pi-coding-agent) agent and injects concise, actionable advice.**
 
