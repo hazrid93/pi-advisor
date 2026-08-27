@@ -8,6 +8,11 @@
 [![pi 0.80+](https://img.shields.io/badge/pi-%3E%3D0.80-8A2BE2)](https://github.com/earendil-works/pi-coding-agent)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
+![npm version](https://img.shields.io/npm/v/@hazrid1993/pi-advisor?style=flat-square)
+
+![npm downloads](https://img.shields.io/npm/dm/@hazrid1993/pi-advisor?style=flat-square&label=npm%20downloads)
+
+
 </div>
 
 ## What it does
