@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { Message } from "@earendil-works/pi-ai";
 import { runAdvisorReview, type AdvisorComplete } from "../src/agent.js";
 import { adviseCall, fakeTurn, fakeModel, readCall, scriptableComplete, textAssistant, assistantMessage } from "./helpers.js";
 
@@ -26,6 +27,140 @@ describe("runAdvisorReview", () => {
 		expect(result.rounds).toBe(1);
 		// The first message sent to the model is the session update as a user turn.
 		expect(complete.calls[0].messages[0].role).toBe("user");
+	});
+
+	it("forwards resolved auth unchanged: null deletion-marker headers, env, and credential baseUrl (pi 0.84)", async () => {
+		const model = fakeModel({ baseUrl: "http://localhost" });
+		let seen: { apiKey?: string; headers?: Record<string, string | null>; env?: Record<string, string> } | undefined;
+		const complete = scriptableComplete([textAssistant("ok")], (_m, _c, options) => {
+			seen = options;
+		});
+		const result = await runAdvisorReview(
+			"### Session update",
+			model,
+			{
+				apiKey: "k",
+				headers: { "X-Custom": "1", "X-Delete-Marker": null },
+				baseUrl: "https://gateway.example/v1",
+				env: { AWS_REGION: "us-east-1" },
+			},
+			"/tmp",
+			new AbortController().signal,
+			{ maxToolRounds: 2, thinking: false, thinkingLevel: "medium", complete },
+		);
+
+		expect(result.error).toBeUndefined();
+		// pi ≥0.84 ProviderHeaders pass through untouched, including `null`
+		// deletion markers that pi-ai applies when merging provider defaults.
+		expect(seen?.headers).toEqual({ "X-Custom": "1", "X-Delete-Marker": null });
+		expect(seen?.apiKey).toBe("k");
+		expect(seen?.env).toEqual({ AWS_REGION: "us-east-1" });
+		// Credential-resolved endpoint overrides the model's catalog baseUrl,
+		// mirroring pi core's model runtime.
+		expect(complete.calls[0].model.baseUrl).toBe("https://gateway.example/v1");
+	});
+
+	it("sends history unchanged as the leading prefix; the new update is the last message", async () => {
+		const model = fakeModel();
+		const history: Message[] = [
+			{ role: "user", content: "### Session update\n\n[User]: earlier", timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: "looked fine" }], timestamp: 2 } as unknown as Message,
+		];
+		const complete = scriptableComplete([textAssistant("ok")]);
+		const t = fakeTurn(model, complete);
+		const result = await runAdvisorReview(
+			"### Session update\n\n[User]: now",
+			t.model,
+			t.auth,
+			t.cwd,
+			t.signal,
+			t.config,
+			history,
+		);
+
+		expect(result.error).toBeUndefined();
+		const msgs = complete.calls[0].messages;
+		// The persistent prefix is forwarded byte-identical (the prompt-cache
+		// invariant) and the new update is appended as the final user message.
+		// (The array reference is captured live, so the advisor's own final turn
+		// may already be appended behind it — the prefix is what matters.)
+		expect(msgs.slice(0, 2)).toEqual(history);
+		expect(msgs[2].role).toBe("user");
+		expect((msgs[2] as { content: string }).content).toContain("[User]: now");
+		expect(msgs.length).toBe(history.length + 2); // update + advisor's final turn
+	});
+
+	it("returns appended = the new user message + the advisor's turns, fully tool-paired", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([
+			assistantMessage([readCall("src/a.ts")]),
+			assistantMessage([adviseCall("watch the null case", "concern")]),
+		]);
+		const t = fakeTurn(model, complete);
+		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		expect(result.error).toBeUndefined();
+		expect(result.advise!.note).toBe("watch the null case");
+		expect(result.appended).toBeDefined();
+		expect(result.appended![0].role).toBe("user");
+		// Every toolResult in the appended set pairs with a preceding toolCall —
+		// the runtime persists this verbatim, so an orphan would 400 the next
+		// request on tool-strict providers (Anthropic).
+		const calls = new Set<string>();
+		for (const m of result.appended!) {
+			if (m.role === "assistant") {
+				for (const c of m.content) if (c.type === "toolCall") calls.add(c.id);
+			}
+			if (m.role === "toolResult") expect(calls.has(m.toolCallId)).toBe(true);
+		}
+		expect(calls.size).toBeGreaterThanOrEqual(2); // read + advise both paired
+	});
+
+	it("drops an empty final response from appended; keeps a substantive one", async () => {
+		const model = fakeModel();
+		const silent = scriptableComplete([assistantMessage([])]);
+		const t1 = fakeTurn(model, silent);
+		const r1 = await runAdvisorReview("u", t1.model, t1.auth, t1.cwd, t1.signal, t1.config);
+		expect(r1.appended).toHaveLength(1); // just the user update
+
+		const spoke = scriptableComplete([textAssistant("all good")]);
+		const t2 = fakeTurn(model, spoke);
+		const r2 = await runAdvisorReview("u", t2.model, t2.auth, t2.cwd, t2.signal, t2.config);
+		expect(r2.appended).toHaveLength(2); // user update + the advisor's final text
+	});
+
+	it("returns no appended when the review fails (partial turns must not persist)", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([]); // script exhausted → throws
+		const t = fakeTurn(model, complete);
+		const result = await runAdvisorReview("u", t.model, t.auth, t.cwd, t.signal, t.config);
+		expect(result.error).toBeTruthy();
+		expect(result.appended).toBeUndefined();
+	});
+
+	it("forwards the per-session sessionId to the completion options (provider prompt-cache key)", async () => {
+		const model = fakeModel();
+		let seen: { sessionId?: string } | undefined;
+		const complete = scriptableComplete([textAssistant("ok")], (_m, _c, options) => {
+			seen = options;
+		});
+		const t = fakeTurn(model, complete);
+		await runAdvisorReview("u", t.model, t.auth, t.cwd, t.signal, { ...t.config, sessionId: "advisor-session-1" });
+		expect(seen?.sessionId).toBe("advisor-session-1");
+	});
+
+	it("uses the model's catalog baseUrl when no credential endpoint is resolved", async () => {
+		const model = fakeModel({ baseUrl: "http://localhost" });
+		const complete = scriptableComplete([textAssistant("ok")]);
+		await runAdvisorReview(
+			"### Session update",
+			model,
+			{ apiKey: "k", headers: {} },
+			"/tmp",
+			new AbortController().signal,
+			{ maxToolRounds: 2, thinking: false, thinkingLevel: "medium", complete },
+		);
+		expect(complete.calls[0].model.baseUrl).toBe("http://localhost");
 	});
 
 	it("appends project instructions to the advisor system prompt", async () => {

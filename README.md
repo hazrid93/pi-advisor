@@ -46,7 +46,7 @@ What this means for `pi-advisor`:
 
 - **Generator + reviewer beats a lone generator.** PairCoder's two-agent split — one model writes, one reviews — is exactly the shape `pi-advisor` gives pi: the main agent codes, the advisor model reviews every turn and catches what tunnel vision misses.
 - **The reviewer can (and often should) be a different model.** PairCoder found heterogeneous pairings frequently beat both constituent models — one reason `/advisor` lets you pick any model rather than a copy of the main agent.
-- **Lightweight beats heavyweight.** PairCoder achieves its gains with 40–70% fewer tokens than multi-agent frameworks. `pi-advisor` follows the same deployment-conscious philosophy: a bounded rolling transcript (default 24,000 characters), read-only exploration, and silence when the main agent is already on track.
+- **Lightweight beats heavyweight.** PairCoder achieves its gains with 40–70% fewer tokens than multi-agent frameworks. `pi-advisor` follows the same deployment-conscious philosophy: a bounded advisor conversation (default 24,000 characters) sent as an append-only prefix for provider prompt-cache hits, read-only exploration, and silence when the main agent is already on track.
 
 One honest difference: PairCoder alternates the two models between coder and reviewer roles when repeated errors signal a stalled interaction. `pi-advisor` keeps the roles fixed — the main agent always drives, the advisor always reviews — because in an interactive session the human decides when to change course.
 
@@ -82,8 +82,16 @@ Do not use the bare `github.com/hazrid93/pi-advisor` form; pi treats bare values
 Use pi's package update command, then reload:
 
 ```bash
-pi update
+pi update --extensions
 ```
+
+(`pi update` alone updates the pi CLI only — `--extensions` updates installed
+packages; `--all` does both.) Unpinned installs — `npm:@hazrid1993/pi-advisor`
+or `git:github.com/hazrid93/pi-advisor` — track the latest release this way.
+Version-pinned installs (`npm:@hazrid1993/pi-advisor@0.6.4`, git tags/commits)
+are deliberately skipped; re-`pi install` with the new version/ref to move them.
+
+Then restart pi or run:
 
 ```text
 /reload
@@ -137,7 +145,13 @@ The default and recommended budget is:
 24,000 characters (roughly 6,000 tokens)
 ```
 
-The limit is character-based, not message-count-based. Oldest complete transcript items are removed first, so the number of retained turns depends on message and tool-output size. A single item is never cut in half and may temporarily exceed the configured budget.
+The limit is character-based, not message-count-based. The budget bounds the
+advisor's **persistent conversation** (see [Prompt-cache-friendly context](#prompt-cache-friendly-context) below):
+when it is exceeded, the **oldest half** of past reviews is dropped at once.
+Cutting only at review boundaries keeps every tool result paired with its tool
+call, and dropping in batches (rather than one message at a time) amortizes the
+provider prompt-cache miss — one cold request, then many cache-hit reviews
+before the next trim.
 
 Inspect or change the window at runtime:
 
@@ -158,7 +172,36 @@ A larger window improves long-task awareness but increases advisor input cost an
 | General coding work | **`24k` (default)** |
 | Long refactors / tool-heavy runs | `40k`–`80k` |
 
-The rolling transcript resets on session replacement, reload, compaction, tree navigation, and advisor configuration changes. Existing history is marked as seen rather than replayed; the advisor resumes with newly submitted prompts and turns.
+The advisor conversation resets on session replacement, reload, compaction, tree navigation, and advisor configuration changes. Existing history is marked as seen rather than replayed; the advisor resumes with newly submitted prompts and turns.
+
+### Prompt-cache-friendly context
+
+The advisor keeps a **persistent, append-only conversation** with its model
+across reviews. Each review sends everything that came before **unchanged as
+the leading prefix** and appends exactly one new user message (that turn's
+session update). Consecutive requests therefore share a byte-identical prefix
+— precisely what provider prompt caching matches against:
+
+- **OpenAI / Gemini-style automatic prefix caching** discounts the repeated
+  prefix with no API changes (the request just has to repeat it verbatim).
+- **Anthropic** caches via `cache_control` breakpoints, which pi-ai applies
+  automatically for Anthropic-api models (system prompt, last tool definition,
+  and the trailing conversation content).
+- A stable per-session id is forwarded as the provider prompt-cache key /
+  session-affinity id (OpenAI `prompt_cache_key`, Anthropic-compatible
+  `x-session-affinity`, OpenRouter `x-session-id`) so cache lookups route
+  consistently.
+
+Without this, every review rebuilt the whole rolling transcript as a fresh
+single-message conversation: full input price for the entire window on every
+turn, and cache hits only on the system prompt + tools. With it, the uncached
+input per review is just the new session update — prior turns, the advisor's
+own notes, and its read/grep/find results are read from cache at the
+provider's discounted rate.
+
+`/advisor status` shows the last review's token usage with its cache split
+(`cache N read / M write`), so you can watch the hit rate. High cache-read on
+an Anthropic/OpenAI advisor model means the prefix is being reused.
 
 ## Project-scoped advisor instructions
 
@@ -231,6 +274,12 @@ cancel. Changes persist to the global config.
 | `mid_pause` | After a quiet period mid-run (debounced; at most once per input) |
 | `input` | On user input — a prompt/intent review before the agent acts |
 
+`input` only counts **real** user input (typed or RPC). pi also fires the
+`input` event for messages injected by extensions — including this
+extension's own `<advisory>` deliveries — and those are deliberately ignored,
+otherwise the advisor would review its own advice or re-arm `mid_pause` after
+every delivery (a self-triggering review loop).
+
 `agent_settled` is the robust choice for "review once when done, not every
 turn": it fires a single non-triggering review per run, so advice can't blast
 one-by-one after completion. `mid_pause` is opt-in early-warning on genuine
@@ -247,7 +296,7 @@ mid-run inactivity; a fluid run that never pauses fires nothing from it.
 | `/advisor thinking <off\|minimal\|low\|medium\|high\|xhigh>` | Configure advisor reasoning effort |
 | `/advisor interrupting [on\|off]` | Control whether all advice immediately triggers a main-agent turn |
 | `/advisor sync <0-6>` | Pause the main loop when the advisor falls this many turns behind; `0` disables waiting |
-| `/advisor context [chars\|Nk\|default]` | Inspect or set the rolling transcript budget |
+| `/advisor context [chars\|Nk\|default]` | Inspect or set the advisor conversation budget |
 | `/advisor triggers [name]` | Toggle review triggers (default: `turn_end`, `tool_error`) |
 | `/advisor instructions [show\|set <text>\|edit\|clear]` | Manage project-scoped advisor guidance |
 | `/advisor instructions global [show\|set <text>\|edit\|clear]` | Manage global (cross-repo) advisor guidance |
@@ -298,7 +347,7 @@ Example:
 | `advisorModel` | `null` | Advisor model as `provider/id`; inactive until selected |
 | `thinking` | `false` | Enable advisor reasoning when supported by the model |
 | `thinkingLevel` | `"medium"` | Reasoning effort |
-| `contextChars` | `24000` | Rolling user/assistant/tool transcript budget |
+| `contextChars` | `24000` | Advisor conversation budget (append-only, cache-friendly; oldest half dropped at once when exceeded) |
 | `cooldownMs` | `0` | Minimum delay between reviews; `0` reviews every completed turn |
 | `maxToolRounds` | `6` | Maximum read-only exploration rounds; hard-capped at 12 |
 | `maxRetries` | `3` | Consecutive failures before the backlog is dropped |
@@ -314,7 +363,11 @@ The global config path follows pi's `getAgentDir()` and therefore respects `PI_C
 user prompt + completed main-agent turn
                  │
                  ▼
-       bounded rolling transcript
+   staged per-turn deltas (bounded)
+                 │
+                 ▼
+ persistent advisor conversation  ←—— append-only prefix, re-sent verbatim
+   + one new "Session update" msg     (provider prompt-cache hits)
                  │
                  ▼
  advisor model + read/grep/find/advise
@@ -328,9 +381,9 @@ user prompt + completed main-agent turn
 Implementation overview:
 
 - `advisor.ts` — pi lifecycle hooks and `/advisor` commands
-- `src/runtime.ts` — rolling transcript, user-prompt capture, queue, retries, resets, dedupe, and delivery
+- `src/runtime.ts` — staged deltas + persistent advisor conversation, user-prompt capture, queue, retries, resets, dedupe, and delivery
 - `src/transcript.ts` — serialization of user, assistant, and tool-result messages
-- `src/agent.ts` — second-model `completeSimple` tool loop
+- `src/agent.ts` — second-model `completeSimple` tool loop (history prefix + `appended` result)
 - `src/tools.ts` — project-confined read-only tools and `advise`
 - `src/project-instructions.ts` — trusted project `.pi/advisor.md` persistence
 - `src/index.ts` — configuration, context parsing, and advisory formatting
@@ -352,7 +405,7 @@ The queue is single-flight, so advisor reviews never overlap. Epoch guards disca
 
 ## Development
 
-Validated against `@earendil-works/pi-*` **0.83.0**.
+Validated against `@earendil-works/pi-*` **0.84.4** (latest; handles the pi 0.84.0 breaking change where `ModelRegistry.getApiKeyAndHeaders()` returns `ProviderHeaders` with `null` header-deletion markers plus credential-resolved `baseUrl`/`env`, all forwarded to the advisor's pi-ai stream unchanged).
 
 ```bash
 npm install

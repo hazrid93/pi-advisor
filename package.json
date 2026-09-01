@@ -1,6 +1,6 @@
 {
   "name": "@hazrid1993/pi-advisor",
-  "version": "0.6.2",
+  "version": "0.6.4",
   "description": "A second model that peer-reviews every turn of your main pi agent and injects concise advice. Pick any model from your registry as the advisor.",
   "type": "module",
   "engines": {
@@ -48,10 +48,10 @@
     "typebox": "1.1.38"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.83.0",
-    "@earendil-works/pi-ai": "0.83.0",
-    "@earendil-works/pi-coding-agent": "0.83.0",
-    "@earendil-works/pi-tui": "0.83.0",
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
     "vitest": "^4.1.0"

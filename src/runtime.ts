@@ -30,11 +30,11 @@
  *   to the retry backoff, so abort/shutdown cancels in-flight work.
  */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Message, Model, ProviderHeaders, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import { runAdvisorReview, type AdvisorReviewResult } from "./agent.js";
+import { randomUUID } from "node:crypto";
+import { runAdvisorReview, type AdvisorAuth, type AdvisorReviewResult } from "./agent.js";
 import { buildSessionUpdate, serializeTurn } from "./transcript.js";
 import {
 	ADVISOR_CUSTOM_TYPE,
@@ -67,7 +67,14 @@ export interface ReviewCtx {
 	signal?: AbortSignal;
 	cwd: string;
 	modelRegistry: { find(provider: string, id: string): Model<Api> | undefined };
-	getApiKeyAndHeaders(model: Model<Api>): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
+	/** pi ≥0.84 resolves auth as ResolvedRequestAuth: `headers` are pi-ai
+	 *  ProviderHeaders (values may be `null` deletion markers) and a
+	 *  credential-resolved `baseUrl`/`env` may accompany the key. All are
+	 *  forwarded to the advisor's pi-ai stream unchanged. */
+	getApiKeyAndHeaders(model: Model<Api>): Promise<
+		| { ok: true; apiKey?: string; headers?: ProviderHeaders; baseUrl?: string; env?: Record<string, string> }
+		| { ok: false; error: string }
+	>;
 	projectInstructions?: string;
 }
 
@@ -87,12 +94,17 @@ interface RequestOpts {
  *  lifecycle signal (B2) so the review always executes against the session
  *  that queued it. */
 interface PendingTurn {
-	/** The advisor-facing "Session update" text for this turn. */
-	text: string;
+	/** The staged, not-yet-reviewed per-turn deltas for this review (the
+	 *  rolling buffer's content, MOVED here at commit so it can't be lost). On
+	 * latest-wins replacement the superseded turn's deltas are merged in. */
+	deltas: string;
+	/** Extra text appended to the update (e.g. the just-completed tool for
+	 *  `tool_result`, or the new prompt for `input`). */
+	extra?: string;
 	/** The advisor model ref to review against (frozen at queue time). */
 	modelRef: string;
 	/** Auth snapshot for the advisor model (frozen at queue time). */
-	auth: { apiKey?: string; headers?: Record<string, string> };
+	auth: AdvisorAuth;
 	/** The advisor model (frozen at queue time). */
 	model: Model<Api>;
 	/** Cwd the advisor explores against (the session cwd at queue time). */
@@ -120,13 +132,29 @@ export class AdvisorRuntime {
 	#epoch = 0;
 	disposed = false;
 
-	/** Rolling buffer of recent per-turn deltas, bounded by `contextChars`.
+	/** Rolling buffer of RECENT per-turn deltas, bounded by `contextChars`.
 	 *  Replaces oh-my-pi's own append-only advisor context (which the extension
 	 *  API can't reach) with a cheap char-bounded approximation. */
 	#contextBuffer: string[] = [];
 	#contextChars = 0;
 	/** User session entries already copied into the rolling advisor context. */
 	#seenUserEntryIds = new Set<string>();
+
+	/** The advisor's PERSISTENT conversation: prior session updates + the
+	 *  advisor's own assistant/toolResult turns, bounded by `contextChars`.
+	 *  Every review sends this UNCHANGED as the leading prefix and appends one
+	 *  new user message (the staged deltas), so consecutive requests share a
+	 *  byte-identical prefix — what provider prompt caching matches against
+	 *  (OpenAI/Gemini automatic prefix caching; Anthropic cache_control markers
+	 *  applied by pi-ai). Without it, each review re-sent the whole rolling
+	 *  buffer as a fresh single-message conversation: full input price every
+	 *  turn and zero cache hits beyond the system prompt. */
+	#advisorHistory: Message[] = [];
+	#historyChars = 0;
+	/** Stable per-session id forwarded to pi-ai as the provider prompt-cache key /
+	 *  session-affinity id (OpenAI `prompt_cache_key`, Anthropic-compatible
+	 *  `x-session-affinity`, OpenRouter `x-session-id`). */
+	readonly #sessionId = randomUUID();
 
 	/** Ring of recently-delivered advice (dedupe + awareness). */
 	#recentAdvice: AdvisorNote[] = [];
@@ -135,6 +163,9 @@ export class AdvisorRuntime {
 	/** Latest review result, for /advisor status. */
 	#lastResult: AdvisorReviewResult | null = null;
 	#lastAdvisorModel: string | null = null;
+	/** Usage of the last completed review round (tokens incl. cache split), for
+	 *  /advisor status — makes prompt-cache effectiveness observable. */
+	#lastUsage: AssistantMessage["usage"] | null = null;
 
 	/** Last time a review was *started*, for the cooldown throttle (D3). */
 	#lastReviewAt = 0;
@@ -165,14 +196,17 @@ export class AdvisorRuntime {
 
 	/** Injectable review function — defaults to {@link runAdvisorReview}. Exposed
 	 *  so the runtime's queue/epoch/retry discipline can be unit-tested with a
-	 *  fake review instead of a real model call. */
+	 *  fake review instead of a real model call. The trailing `history` argument
+	 *  is the advisor's persistent conversation (sent unchanged as the leading
+	 *  prefix of every review — the prompt-cache invariant). */
 	#review: (
 		sessionUpdate: string,
 		model: Model<Api>,
-		auth: { apiKey?: string; headers?: Record<string, string> },
+		auth: AdvisorAuth,
 		cwd: string,
 		signal: AbortSignal,
 		config: Parameters<typeof runAdvisorReview>[5],
+		history?: Message[],
 	) => Promise<AdvisorReviewResult>;
 
 	constructor(
@@ -181,10 +215,11 @@ export class AdvisorRuntime {
 		review?: (
 			sessionUpdate: string,
 			model: Model<Api>,
-			auth: { apiKey?: string; headers?: Record<string, string> },
+			auth: AdvisorAuth,
 			cwd: string,
 			signal: AbortSignal,
 			config: Parameters<typeof runAdvisorReview>[5],
+			history?: Message[],
 		) => Promise<AdvisorReviewResult>,
 	) {
 		this.#review = review ?? ((text, model, auth, cwd, signal, cfg) => runAdvisorReview(text, model, auth, cwd, signal, cfg));
@@ -200,6 +235,12 @@ export class AdvisorRuntime {
 
 	get lastAdvisorModel(): string | null {
 		return this.#lastAdvisorModel;
+	}
+
+	/** Token usage of the last completed advisor round (input/output plus the
+	 *  cacheRead/cacheWrite split), for /advisor status. */
+	get lastUsage(): AssistantMessage["usage"] | null {
+		return this.#lastUsage;
 	}
 
 	/** How many turns the advisor is behind the main agent right now: the queued
@@ -320,9 +361,17 @@ export class AdvisorRuntime {
 	/** `input` adapter. ALWAYS delimits a goal (arms/cancels `mid_pause`) so the
 	 *  debounce is scoped per-user-input regardless of whether `input` itself is
 	 *  a review trigger. When `input` IS enabled: runs a prompt-review (judges
-	 *  intent before the agent acts) with the prompt as extra context. */
-	onInput(text: string, ctx: ReviewCtx): Promise<void> {
+	 *  intent before the agent acts) with the prompt as extra context.
+	 *
+	 *  `source: "extension"` inputs are IGNORED entirely. pi fires `input` for
+	 *  every `sendMessage` delivery — including THIS extension's own advice — so
+	 *  treating them as user input would make the advisor review its own advice
+	 *  (input trigger) or re-arm `mid_pause` after each delivery
+	 *  (`#midPauseFiredThisRun` reset), a self-triggering review loop. Only real
+	 *  user input (interactive/RPC) delimits a goal. */
+	onInput(text: string, ctx: ReviewCtx, source?: "interactive" | "rpc" | "extension"): Promise<void> {
 		if (this.disposed || !this.config.enabled || !this.config.advisorModel) return Promise.resolve();
+		if (source === "extension") return Promise.resolve();
 		// Re-arm mid_pause for a new run: a fresh prompt means any prior quiet
 		// period was the inter-message gap, not a decision pause.
 		this.#midPauseFiredThisRun = false;
@@ -365,16 +414,17 @@ export class AdvisorRuntime {
 		}
 	}
 
-	/** Build the full session-update text from the rolling context buffer and a
-	 *  recent-advice preamble (only when not about to be deduped). The current
-	 *  turn is already in the buffer (pushed before queueing), so we just join. */
-	#buildUpdate(withPreamble: boolean): string {
+	/** Build one review's session-update text: recent-advice preamble (so the
+	 *  advisor can honor "NEVER repeat advice you already gave") + the
+	 *  "### Session update" header + this review's staged deltas (+ extra).
+	 *  Only the NEW delta rides here — prior turns live in the persistent
+	 *  history prefix, keeping each request's uncached tail minimal. */
+	#buildTurnText(deltas: string, extra: string | undefined, withPreamble: boolean): string {
 		const recent = withPreamble ? this.#recentAdvice.slice(-RECENT_ADVICE_LIMIT) : [];
 		const preamble = recent.length > 0 ? formatRecentAdvicePreamble(recent) : undefined;
-		const body = this.#contextBuffer.join("\n\n");
+		const body = [deltas, extra].filter(Boolean).join("\n\n");
 		return buildSessionUpdate(body, preamble);
 	}
-
 	/** Add each new user prompt exactly once, preserving branch order. */
 	#captureNewUserMessages(branch: SessionEntry[]): void {
 		for (const entry of branch) {
@@ -461,11 +511,21 @@ export class AdvisorRuntime {
 		// Commit: become the newest generation. Any still-in-flight review with an
 		// older gen will have its delivery suppressed.
 		const myGen = ++this.#generation;
-		const text = opts.extra ? `${this.#buildUpdate(true)}\n\n${opts.extra}` : this.#buildUpdate(true);
+		// Move the staged deltas into this pending turn (they are now frozen for
+		// this review; new captures accumulate in the buffer for the NEXT one). A
+		// superseded pending turn's deltas are MERGED in so latest-wins never
+		// drops captured content. This happens at commit (after the auth/gen/
+		// cooldown early-returns) so a dropped request leaves its deltas staged.
+		const staged = this.#contextBuffer.join("\n\n");
+		this.#contextBuffer = [];
+		this.#contextChars = 0;
+		const superseded = this.#pending[0];
+		const deltas = [superseded?.deltas, staged].filter(Boolean).join("\n\n");
 		const turn: PendingTurn = {
-			text,
+			deltas,
+			extra: opts.extra,
 			modelRef: ref,
-			auth: { apiKey: auth.apiKey, headers: auth.headers },
+			auth: { apiKey: auth.apiKey, headers: auth.headers, baseUrl: auth.baseUrl, env: auth.env },
 			model,
 			cwd: ctx.cwd,
 			projectInstructions: ctx.projectInstructions,
@@ -508,6 +568,8 @@ export class AdvisorRuntime {
 		this.#pendingToolError = false;
 		this.#cancelMidPause();
 		this.#midPauseFiredThisRun = false;
+		this.#advisorHistory = [];
+		this.#historyChars = 0;
 		this.#seenUserEntryIds = new Set(
 			branch
 				.filter((entry) => entry.type === "message" && entry.message.role === "user")
@@ -524,6 +586,8 @@ export class AdvisorRuntime {
 		this.#consecutiveFailures = 0;
 		this.#contextBuffer = [];
 		this.#contextChars = 0;
+		this.#advisorHistory = [];
+		this.#historyChars = 0;
 		this.#seenUserEntryIds.clear();
 		this.#pendingToolError = false;
 		this.#cancelMidPause();
@@ -630,7 +694,52 @@ export class AdvisorRuntime {
 
 	async #runOne(turn: PendingTurn): Promise<AdvisorReviewResult> {
 		this.#lastAdvisorModel = turn.modelRef;
-		return this.#review(turn.text, turn.model, turn.auth, turn.cwd, turn.signal, this.#realDepsAdapter(turn));
+		// The review text is built at DRAIN time from the turn's frozen deltas —
+		// deltas captured while the turn sat pending are already staged for the
+		// NEXT review (or merged on latest-wins replacement), never lost.
+		const text = this.#buildTurnText(turn.deltas, turn.extra, true);
+		const result = await this.#review(
+			text,
+			turn.model,
+			turn.auth,
+			turn.cwd,
+			turn.signal,
+			this.#realDepsAdapter(turn),
+			this.#advisorHistory,
+		);
+		// Persist the advisor's own turns into the conversation on success (even
+		// if this batch was generation-suppressed for DELIVERY, the advisor really
+		// said/did these things — keeping them preserves the NEVER-repeat context
+		// and the cache prefix). Failed/aborted reviews append nothing: a partial
+		// turn could orphan toolCalls without their toolResults.
+		if (!result.error && result.appended && result.appended.length > 0) {
+			this.#extendHistory(result.appended);
+		}
+		return result;
+	}
+
+	/** Append one review's messages to the persistent advisor conversation and
+	 *  keep it bounded. Eviction drops the oldest HALF of review segments at
+	 *  once (a segment starts at each user message) rather than one message per
+	 *  review: batch eviction amortizes the prompt-cache miss — one cold request
+	 *  now, then ~S/2 cache-hit reviews before the next trim. Cutting only at
+	 *  user-message boundaries never orphans a toolResult from its toolCall. */
+	#extendHistory(appended: Message[]): void {
+		this.#advisorHistory.push(...appended.map(boundToolResultChars));
+		this.#historyChars += appended.reduce((n, m) => n + estimateMessageChars(m), 0);
+		const cap = Math.max(512, this.config.contextChars);
+		if (this.#historyChars <= cap) return;
+		const starts: number[] = []
+		this.#advisorHistory.forEach((m, i) => {
+			if (m.role === "user") starts.push(i);
+		});
+		// Never drop the only (newest) segment; a single oversized review is
+		// bounded by maxToolRounds and the per-toolResult cap applied on append.
+		if (starts.length <= 1) return;
+		const dropSegments = Math.floor(starts.length / 2);
+		const cut = starts[dropSegments];
+		this.#advisorHistory = this.#advisorHistory.slice(cut);
+		this.#historyChars = this.#advisorHistory.reduce((n, m) => n + estimateMessageChars(m), 0);
 	}
 
 	/** Adapter that lets the injectable `review(text, ref)` test path drive the
@@ -642,7 +751,10 @@ export class AdvisorRuntime {
 			maxToolRounds: this.config.maxToolRounds,
 			systemPrompt: this.config.systemPrompt,
 			projectInstructions: turn.projectInstructions,
-			onUsage: () => {},
+			sessionId: this.#sessionId,
+			onUsage: (usage) => {
+				this.#lastUsage = usage;
+			},
 		};
 	}
 
@@ -658,6 +770,38 @@ export class AdvisorRuntime {
  *  `turn_start` gate. Globals are used (not module-closure) so test monkeypatches
  *  of globalThis.setTimeout apply. */
 const CATCHUP_POLL_MS = 50;
+
+/** Hard cap on a toolResult's persisted text in the advisor history. The
+ *  in-loop copy keeps the full result (the advisor needs it for the CURRENT
+ *  review); the history copy only feeds future context, where a bounded tail
+ *  suffices and keeps one read-heavy review from blowing the budget. */
+const HISTORY_TOOL_RESULT_MAX_CHARS = 10_000;
+
+/** Bound a message's persisted footprint: toolResult text beyond
+ *  HISTORY_TOOL_RESULT_MAX_CHARS is truncated (head + tail) in the history
+ *  copy. Other messages pass through unchanged. */
+function boundToolResultChars(m: Message): Message {
+	if (m.role !== "toolResult") return m;
+	let text = "";
+	for (const part of m.content) {
+		if (part.type === "text") text += part.text;
+	}
+	if (text.length <= HISTORY_TOOL_RESULT_MAX_CHARS) return m;
+	const head = Math.floor(HISTORY_TOOL_RESULT_MAX_CHARS * 0.7);
+	const tail = HISTORY_TOOL_RESULT_MAX_CHARS - head;
+	const truncated = `${text.slice(0, head)}\n\n[... advisor history truncated at ${HISTORY_TOOL_RESULT_MAX_CHARS} chars; full result was seen during that review ...]\n\n${text.slice(-tail)}`;
+	return { ...m, content: [{ type: "text", text: truncated }] };
+}
+
+/** Rough char estimate of a message for budget accounting (never sent to the
+ *  provider; only used to decide when the history needs trimming). */
+function estimateMessageChars(m: Message): number {
+	try {
+		return JSON.stringify(m).length;
+	} catch {
+		return 512;
+	}
+}
 
 /** A delay that resolves to `true` if `signal` aborted before the timeout, else
  *  `false`. Used for the retry backoff so dispose/reset cancels it (B2). */

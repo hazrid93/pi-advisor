@@ -13,8 +13,7 @@ import type {
 	Model,
 	ToolCall,
 } from "@earendil-works/pi-ai";
-import type { AdvisorComplete } from "../src/agent.js";
-import type { AdvisorReviewConfig } from "../src/agent.js";
+import type { AdvisorAuth, AdvisorComplete, AdvisorReviewConfig } from "../src/agent.js";
 
 /** A minimal advisor-capable model fixture. */
 export function fakeModel(overrides: Partial<Model<Api>> = {}): Model<Api> {
@@ -89,14 +88,14 @@ export function readCall(path: string): ToolCall {
  */
 export function scriptableComplete(
 	script: AssistantMessage[],
-	onCall?: (model: Model<Api>, context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] }, options?: { reasoning?: string; apiKey?: string }) => void,
+	onCall?: (model: Model<Api>, context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] }, options?: { reasoning?: string; apiKey?: string; sessionId?: string }) => void,
 ): AdvisorComplete & { calls: { model: Model<Api>; messages: Message[]; reasoning?: string }[] } {
 	const calls: { model: Model<Api>; messages: Message[]; reasoning?: string }[] = [];
 	let i = 0;
 	const fn = (async (
 		model: Model<Api>,
 		context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] },
-		options?: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal; reasoning?: string },
+		options?: { apiKey?: string; headers?: Record<string, string | null>; env?: Record<string, string>; signal?: AbortSignal; reasoning?: string; sessionId?: string; cacheRetention?: "none" | "short" | "long" },
 	) => {
 		calls.push({ model, messages: context.messages, reasoning: options?.reasoning });
 		onCall?.(model, context, options);
@@ -112,7 +111,7 @@ export function scriptableComplete(
  *  scriptable complete. Mirrors how the runtime calls the loop. */
 export interface FakeTurnArgs {
 	model: Model<Api>;
-	auth: { apiKey?: string; headers?: Record<string, string> };
+	auth: AdvisorAuth;
 	cwd: string;
 	signal: AbortSignal;
 	config: AdvisorReviewConfig;

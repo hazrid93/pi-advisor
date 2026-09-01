@@ -927,6 +927,17 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	if (rt) {
 		lines.push(`Busy: ${rt.isBusy ? "yes (reviewing)" : "no"}`);
 		lines.push(summarizeResult(rt.lastResult));
+		// Token usage of the last completed review round, with the cache split —
+		// makes prompt-cache effectiveness visible at a glance (cache-read high =
+		// the append-only conversation prefix is hitting).
+		const usage = rt.lastUsage;
+		if (usage) {
+			const fmt = (n: number) => n.toLocaleString();
+			const cache = usage.cacheRead > 0 || usage.cacheWrite > 0
+				? ` · cache ${fmt(usage.cacheRead)} read / ${fmt(usage.cacheWrite)} write`
+					: " · cache 0 (provider did not report prompt caching)";
+			lines.push(`Last review usage: ${fmt(usage.input)} in${cache} · ${fmt(usage.output)} out tokens`);
+		}
 	} else {
 		lines.push("Runtime: not started yet (no turn reviewed)");
 	}

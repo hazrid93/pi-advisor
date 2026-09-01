@@ -9,11 +9,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { AdvisorRuntime, deliveryOptions } from "../src/runtime.js";
-import type { Api, AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Message, Model, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { ADVISOR_CUSTOM_TYPE } from "../src/index.js";
-import type { AdvisorReviewResult } from "../src/agent.js";
+import type { AdvisorAuth, AdvisorReviewResult } from "../src/agent.js";
 import type { AdvisorNote, AdvisorTrigger } from "../src/index.js";
 
 let idCounter = 0;
@@ -54,14 +54,16 @@ function advisorEntry(note = "x"): SessionEntry {
 	} as SessionEntry;
 }
 
-/** The runtime's full review-fn signature, simplified for tests. */
+/** The runtime's full review-fn signature, simplified for tests. The trailing
+ *  `history` arg is the advisor's persistent conversation prefix. */
 type ReviewFn = (
 	text: string,
 	model: Model<Api>,
-	auth: { apiKey?: string; headers?: Record<string, string> },
+	auth: AdvisorAuth,
 	cwd: string,
 	signal: AbortSignal,
-	config: { maxToolRounds: number; thinking: boolean; thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh"; systemPrompt?: string; onUsage?: () => void },
+	config: { maxToolRounds: number; thinking: boolean; thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh"; systemPrompt?: string; onUsage?: (usage: AssistantMessage["usage"]) => void; sessionId?: string },
+	history?: Message[],
 ) => Promise<AdvisorReviewResult>;
 
 /** A usable assistant message + toolResults for a turn. */
@@ -135,6 +137,23 @@ async function settle(rt: AdvisorRuntime, ms = 50): Promise<void> {
 		await new Promise((r) => setTimeout(r, ms / 10));
 	}
 	await new Promise((r) => setTimeout(r, 5));
+}
+
+/** Flush one macrotask (+ pending microtasks). Real-timer counterpart to
+ *  `vi.advanceTimersByTimeAsync(0)` under fake timers. */
+const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+/** A review fn that records each snapshot text and stays in flight until the
+ *  test calls `release`. Used to model an in-flight review while newer events
+ *  arrive (latest-wins). */
+function hangingReview(): { review: ReviewFn; calls: string[]; release: (r: AdvisorReviewResult) => void } {
+	const calls: string[] = [];
+	let release: (r: AdvisorReviewResult) => void = () => {};
+	const review: ReviewFn = (text) => {
+		calls.push(text);
+		return new Promise<AdvisorReviewResult>((res) => { release = res; });
+	};
+	return { review, calls, release: (r) => release(r) };
 }
 
 describe("deliveryOptions", () => {
@@ -307,8 +326,8 @@ describe("AdvisorRuntime — epoch guards / reset", () => {
 	});
 });
 
-describe("AdvisorRuntime — rolling context buffer", () => {
-	it("includes each new user prompt before the assistant turn and does not duplicate it", async () => {
+describe("AdvisorRuntime — persistent advisor history (replaces rolling re-render)", () => {
+	it("each update carries only its new delta — prior turns are not re-rendered", async () => {
 		const seenTexts: string[] = [];
 		const { rt, ctx } = makeRuntime(async (text: string) => { seenTexts.push(text); return { advise: null, rounds: 0 }; });
 		const user = entry("user", "Use PostgreSQL and keep the public API stable");
@@ -322,7 +341,12 @@ describe("AdvisorRuntime — rolling context buffer", () => {
 		expect(seenTexts).toHaveLength(2);
 		expect(seenTexts[0]).toContain("Use PostgreSQL and keep the public API stable");
 		expect(seenTexts[0].indexOf("Use PostgreSQL")).toBeLessThan(seenTexts[0].indexOf("update the storage layer"));
-		expect(seenTexts[1].match(/Use PostgreSQL/g)).toHaveLength(1);
+		// The first review covered the user prompt + turn 1; the second update
+		// carries ONLY turn 2's delta. The past lives in the history prefix (the
+		// cacheable part), so the uncached input per review stays minimal.
+		expect(seenTexts[1]).not.toContain("Use PostgreSQL");
+		expect(seenTexts[1]).not.toContain("update the storage layer");
+		expect(seenTexts[1]).toContain("Storage changes are complete");
 	});
 
 	it("seedToLeaf clears the buffer so old turns and old user prompts are not replayed", async () => {
@@ -335,6 +359,169 @@ describe("AdvisorRuntime — rolling context buffer", () => {
 		expect(seenTexts).toHaveLength(1);
 		expect(seenTexts[0]).toContain("after-seed");
 		expect(seenTexts[0]).not.toContain("old1");
+	});
+});
+
+describe("AdvisorRuntime — history prefix (prompt-cache invariants)", () => {
+	/** Message builders for fake `appended` payloads. */
+	const histUser = (text: string, ts: number): Message => ({ role: "user", content: text, timestamp: ts });
+	const histAssistantText = (text: string, ts: number): Message => ({ role: "assistant", content: [{ type: "text", text }], timestamp: ts } as unknown as Message);
+	const histAssistantCall = (id: string, ts: number): Message => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "f" } }], timestamp: ts } as unknown as Message);
+	const histToolResult = (id: string, text: string): Message => ({ role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text }], timestamp: 0 } as unknown as Message);
+
+	it("second review sends the first review's appended messages as a byte-identical prefix", async () => {
+		const appended1 = [histUser("### Session update\n\n[User]: first", 1), histAssistantText("reviewed", 2)];
+		const appended2 = [histUser("### Session update\n\n[User]: second", 3)];
+		const queue = [appended1, appended2];
+		const histories: Message[][] = [];
+		const review: ReviewFn = async (_text, _m, _a, _c, _s, _cfg, history) => {
+			histories.push(history ? [...history] : []);
+			return { advise: null, rounds: 0, appended: queue.shift() };
+		};
+		const { rt, ctx } = makeRuntime(review);
+		const t1 = turn("first");
+		await rt.onTurnEnd(t1.message as AgentMessage, t1.toolResults, [entry("user", "u1")], ctx);
+		await settle(rt);
+		const t2 = turn("second");
+		await rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [], ctx);
+		await settle(rt);
+
+		expect(histories).toHaveLength(2);
+		expect(histories[0]).toEqual([]); // cold start: no prefix yet
+		// THE prompt-cache invariant: the next request's leading messages are
+		// byte-identical to what the previous request sent — providers match
+		// cached prefixes against exactly this.
+		expect(histories[1]).toEqual(appended1);
+	});
+
+	it("a failed review does not extend the history (partial turns could orphan toolCalls)", async () => {
+		const appended = [histUser("x", 1)];
+		const histories: Message[][] = [];
+		const review: ReviewFn = async (_t, _m, _a, _c, _s, _cfg, history) => {
+			histories.push(history ? [...history] : []);
+			// Error WITH appended: the runtime must still refuse to persist.
+			return { advise: null, rounds: 0, error: "boom", appended };
+		};
+		const { rt, ctx } = makeRuntime(review, [], { maxRetries: 1 });
+		const t1 = turn("a");
+		await rt.onTurnEnd(t1.message as AgentMessage, t1.toolResults, [], ctx);
+		await settle(rt);
+		const t2 = turn("b");
+		await rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [], ctx);
+		await settle(rt);
+		expect(histories).toHaveLength(2);
+		expect(histories[1]).toEqual([]); // the failure persisted nothing
+	});
+
+	it("latest-wins replacement merges deltas so no captured turn is lost", async () => {
+		const { review, calls, release } = hangingReview();
+		const { rt, ctx } = makeRuntime(review);
+		const t0 = turn("turn-0");
+		void rt.onTurnEnd(t0.message as AgentMessage, t0.toolResults, [entry("user", "u0")], ctx);
+		await flush();
+		expect(rt.isBusy).toBe(true);
+		// While in flight, two more turns arrive — each replaces the pending, so
+		// the pending's deltas must MERGE with the newer capture.
+		const t1 = turn("turn-1");
+		void rt.onTurnEnd(t1.message as AgentMessage, t1.toolResults, [entry("user", "u1")], ctx);
+		const t2 = turn("turn-2");
+		void rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [entry("user", "u2")], ctx);
+		await flush();
+		release({ advise: null, rounds: 0 }); // stale in-flight completes (suppressed)
+		await flush(); // merged pending drains, second review starts (hangs)
+		release({ advise: null, rounds: 0 }); // merged review completes
+		await settle(rt);
+		expect(calls).toHaveLength(2);
+		expect(calls[1]).toContain("turn-1");
+		expect(calls[1]).toContain("turn-2");
+	});
+
+	it("cooldown-coalesced deltas ride the next eligible review", async () => {
+		const seen: string[] = [];
+		const { rt, ctx } = makeRuntime(async (text: string) => { seen.push(text); return { advise: null, rounds: 0 }; }, [], { cooldownMs: 40 });
+		const t1 = turn("alpha");
+		await rt.onTurnEnd(t1.message as AgentMessage, t1.toolResults, [entry("user", "u1")], ctx);
+		await settle(rt);
+		const t2 = turn("beta");
+		await rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [entry("user", "u2")], ctx);
+		await settle(rt);
+		expect(seen).toHaveLength(1); // coalesced into the cooldown window
+		await new Promise((r) => setTimeout(r, 60)); // cooldown elapses
+		const t3 = turn("gamma");
+		await rt.onTurnEnd(t3.message as AgentMessage, t3.toolResults, [entry("user", "u3")], ctx);
+		await settle(rt);
+		expect(seen).toHaveLength(2);
+		expect(seen[1]).toContain("beta"); // not dropped — folded into the next review
+		expect(seen[1]).toContain("gamma");
+	});
+
+	it("history eviction drops the oldest half at user-message boundaries without orphaning toolResults", async () => {
+		const histories: Message[][] = [];
+		let n = 0;
+		const review: ReviewFn = async (_t, _m, _a, _c, _s, _cfg, history) => {
+			histories.push(history ? [...history] : []);
+			n++;
+			// Each review appends one segment: user + assistant(toolCall) +
+			// toolResult + final assistant — sized to overflow a tiny budget.
+			return {
+				advise: null,
+				rounds: 1,
+				appended: [
+					histUser(`update ${n} `.padEnd(120, "x"), n),
+					histAssistantCall(`c${n}`, n),
+					histToolResult(`c${n}`, "y".repeat(400)),
+					histAssistantText("done", n),
+				],
+			};
+		};
+		const { rt, ctx } = makeRuntime(review, [], { contextChars: 600 });
+		for (let i = 0; i < 7; i++) {
+			const t = turn(`t${i}`);
+			await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [entry("user", `u${i}`)], ctx);
+			await settle(rt);
+		}
+		const finalHistory = histories[histories.length - 1];
+		// Eviction happened: fewer segments remain than the 7 appended.
+		const userCount = finalHistory.filter((m) => m.role === "user").length;
+		expect(userCount).toBeGreaterThan(0);
+		expect(userCount).toBeLessThan(7);
+		// The history always begins at a segment boundary (a user message)…
+		expect(finalHistory[0].role).toBe("user");
+		// …and no toolResult is ever orphaned from its toolCall.
+		const seenCalls = new Set<string>();
+		for (const m of finalHistory) {
+			if (m.role === "assistant") {
+				for (const c of m.content) if (c.type === "toolCall") seenCalls.add(c.id);
+			}
+			if (m.role === "toolResult") expect(seenCalls.has(m.toolCallId)).toBe(true);
+		}
+	});
+
+	it("forwards a stable per-session sessionId (provider prompt-cache key)", async () => {
+		const ids: (string | undefined)[] = [];
+		const review: ReviewFn = async (_t, _m, _a, _c, _s, cfg) => { ids.push(cfg.sessionId); return { advise: null, rounds: 0 }; };
+		const { rt, ctx } = makeRuntime(review);
+		for (let i = 0; i < 2; i++) {
+			const t = turn(`t${i}`);
+			await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+			await settle(rt);
+		}
+		expect(ids).toHaveLength(2);
+		expect(ids[0]).toBeTruthy();
+		expect(ids[1]).toBe(ids[0]); // stable across reviews within the session
+	});
+
+	it("records the last review's usage (incl. cache split) for /advisor status", async () => {
+		const usage = { input: 1200, output: 40, cacheRead: 1000, cacheWrite: 160 } as AssistantMessage["usage"];
+		const review: ReviewFn = async (_t, _m, _a, _c, _s, cfg) => {
+			cfg.onUsage?.(usage);
+			return { advise: null, rounds: 0 };
+		};
+		const { rt, ctx } = makeRuntime(review);
+		const t = turn("x");
+		await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+		await settle(rt);
+		expect(rt.lastUsage).toEqual(usage);
 	});
 });
 
@@ -487,23 +674,6 @@ describe("AdvisorRuntime — waitForCatchUp (sync gate)", () => {
 });
 
 describe("AdvisorRuntime — selectable triggers", () => {
-	/** Flush one macrotask (+ pending microtasks). Real-timer counterpart to
-	 *  `vi.advanceTimersByTimeAsync(0)` under fake timers. */
-	const flush = () => new Promise<void>((r) => setTimeout(r, 0));
-
-	/** A review fn that records each snapshot text and stays in flight until the
-	 *  test calls `release`. Used to model an in-flight review while newer
-	 *  events arrive (latest-wins). */
-	function hangingReview(): { review: ReviewFn; calls: string[]; release: (r: AdvisorReviewResult) => void } {
-		const calls: string[] = [];
-		let release: (r: AdvisorReviewResult) => void = () => {};
-		const review: ReviewFn = (text) => {
-			calls.push(text);
-			return new Promise<AdvisorReviewResult>((res) => { release = res; });
-		};
-		return { review, calls, release: (r) => release(r) };
-	}
-
 	it("default triggers review on turn_end", async () => {
 		const { rt, ctx, sendAdvice } = makeRuntime(async () => ({ advise: null, rounds: 0 }));
 		const t = turn("hello");
@@ -697,5 +867,52 @@ describe("AdvisorRuntime — selectable triggers", () => {
 		await settle(rt);
 		expect(captured).toContain("[user prompt]");
 		expect(captured).toContain("refactor everything");
+	});
+
+	it("extension-sourced input never runs a prompt review (self-delivery loop fix)", async () => {
+		// pi fires `input` for extension sendMessage deliveries too — including
+		// THIS extension's own advice. Those must not be treated as user prompts,
+		// or the advisor would review its own advice (review → deliver → input →
+		// review → …).
+		const review = vi.fn(async () => ({ advise: null, rounds: 0 }));
+		const { rt, ctx } = makeRuntime(review as never, [], { triggers: ["input"] });
+		await rt.onInput("<advisory severity=\"concern\">…</advisory>", ctx, "extension");
+		await settle(rt);
+		expect(review).not.toHaveBeenCalled();
+		// Real user input (interactive/RPC) still reviews.
+		await rt.onInput("real prompt", ctx, "interactive");
+		await settle(rt);
+		expect(review).toHaveBeenCalledTimes(1);
+		await rt.onInput("rpc prompt", ctx, "rpc");
+		await settle(rt);
+		expect(review).toHaveBeenCalledTimes(2);
+	});
+
+	it("extension-sourced input does not re-arm mid_pause (delivery self-trigger fix)", async () => {
+		vi.useFakeTimers();
+		try {
+			// Distinct notes per review: the delivery-time dedupe ring would
+			// otherwise (correctly) suppress an identical repeat.
+			let n = 0;
+			const { rt, ctx, sendAdvice } = makeRuntime(
+				async () => ({ advise: { note: `p${++n}`, severity: "nit" as const }, rounds: 1 }),
+				[],
+				{ triggers: ["mid_pause"], midPauseMs: 1000 },
+			);
+			rt.onMessageUpdate(ctx);
+			await vi.advanceTimersByTimeAsync(1000); // quiet period fires once
+			expect(sendAdvice).toHaveBeenCalledTimes(1);
+			// The delivery fires input(source: "extension") — must NOT reset the
+			// once-per-run budget or re-arm the debounce.
+			await rt.onInput("<advisory>delivered</advisory>", ctx, "extension");
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(sendAdvice).toHaveBeenCalledTimes(1); // still exactly one
+			// A genuine user prompt re-arms for the next run.
+			await rt.onInput("next goal", ctx, "interactive");
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(sendAdvice).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

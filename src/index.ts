@@ -170,10 +170,12 @@ export interface AdvisorConfig {
 	thinking: boolean;
 	/** Thinking effort when `thinking` is on. */
 	thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh";
-	/** Approximate char budget for the advisor's rolling context buffer of recent
-	 *  per-turn deltas. The oldest turn is evicted when exceeded, so cost stays
-	 *  bounded while the advisor keeps cross-turn context (replacing oh-my-pi's
-	 *  own append-only context, which the extension API can't reach). */
+	/** Approximate char budget for the advisor's persistent conversation of
+	 *  recent session updates + its own review turns. Kept append-only across
+	 *  reviews so consecutive requests share a byte-identical prefix (provider
+	 *  prompt-cache hits); when exceeded, the oldest half of past reviews is
+	 *  dropped at once. Also bounds the staging buffer of not-yet-reviewed
+	 *  per-turn deltas. */
 	contextChars: number;
 	/** Minimum gap (ms) between advisor reviews. 0 = review every turn_end (the
 	 *  default). Set higher to throttle cost on a busy agent: turns arriving

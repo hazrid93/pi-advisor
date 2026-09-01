@@ -24,6 +24,7 @@ import type {
 	AssistantMessage,
 	Message,
 	Model,
+	ProviderHeaders,
 	TextContent,
 	ThinkingLevel,
 	ToolCall,
@@ -45,8 +46,40 @@ void ADVISE_TOOL_DESCRIPTION;
 export type AdvisorComplete = (
 	model: Model<Api>,
 	context: { systemPrompt?: string; messages: Message[]; tools?: ReturnType<typeof advisorTools> },
-	options?: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal; reasoning?: string },
+	options?: {
+		apiKey?: string;
+		headers?: ProviderHeaders;
+		env?: Record<string, string>;
+		signal?: AbortSignal;
+		reasoning?: string;
+		/** Stable per-session id: pi-ai maps it to provider prompt-cache keys /
+		 *  session-affinity routing (OpenAI `prompt_cache_key`, Anthropic-compatible
+		 *  `x-session-affinity`, OpenRouter `x-session-id`). Ignored by providers
+		 *  without session-aware caching. */
+		sessionId?: string;
+		/** Prompt-cache retention preference ("none" | "short" | "long"). Defaults
+		 *  to "short" inside pi-ai — usually the right choice for an advisor that
+		 *  reviews every turn (each hit refreshes the short TTL). */
+		cacheRetention?: "none" | "short" | "long";
+	},
 ) => Promise<AssistantMessage>;
+
+/** Auth snapshot for one advisor review. Mirrors the shape pi ≥0.84 resolves
+ *  via `ModelRegistry.getApiKeyAndHeaders()` (ResolvedRequestAuth):
+ *  - `headers` are pi-ai `ProviderHeaders` — values may be `null` deletion
+ *    markers, which must be forwarded to pi-ai streams UNCHANGED (pi-ai merges
+ *    them over provider defaults and applies the deletions itself);
+ *  - `baseUrl`/`env` are the credential-resolved endpoint/environment pi
+ *    core's model runtime would apply for the same provider (e.g. account-
+ *    scoped gateways, Copilot Business/Enterprise, provider regional env). */
+export interface AdvisorAuth {
+	apiKey?: string;
+	headers?: ProviderHeaders;
+	/** Credential-resolved endpoint override for the model's catalog baseUrl. */
+	baseUrl?: string;
+	/** Provider-scoped environment values (region/proxy configuration). */
+	env?: Record<string, string>;
+}
 
 /** Loop config that doesn't vary per turn: thinking, round cap, system prompt,
  *  usage sink. The per-turn bits (model, auth, cwd, signal) are positional args
@@ -66,6 +99,9 @@ export interface AdvisorReviewConfig {
 	onUsage?: (usage: AssistantMessage["usage"], model: Model<Api>) => void;
 	/** Injected completion function (defaults to pi-ai's `completeSimple`). */
 	complete?: AdvisorComplete;
+	/** Stable per-session identifier forwarded to the provider as a prompt-cache
+	 *  key / session-affinity id (see AdvisorComplete options). */
+	sessionId?: string;
 }
 
 /** The result of one advisor review. */
@@ -76,6 +112,13 @@ export interface AdvisorReviewResult {
 	rounds: number;
 	/** Failure reason, when the review could not complete. */
 	error?: string;
+	/** The messages this review added on top of `history` (the new user update +
+	 *  the advisor's own assistant/toolResult turns), in order. Present only on
+	 *  success; the runtime persists them as the advisor's conversation history
+	 *  so the NEXT review re-sends a byte-identical prefix (prompt-cache hits)
+	 *  and the advisor can see what it previously said/did. A failed or aborted
+	 *  review returns nothing here — a partial turn could orphan toolCalls. */
+	appended?: Message[];
 }
 
 /** Hard cap on total loop iterations even if maxToolRounds is set very high. */
@@ -84,14 +127,23 @@ const ABSOLUTE_MAX_ROUNDS = 12;
 /** Run one advisor review. Returns the captured advice (or null for silence).
  *
  *  Per-turn inputs (model, auth, cwd, signal) are positional so they're frozen
- *  at queue time (B3); everything else rides in `config`. */
+ *  at queue time (B3); everything else rides in `config`.
+ *
+ *  `history` is the advisor's persistent conversation (prior updates + the
+ *  advisor's own turns). It is sent UNCHANGED as the leading prefix and the
+ *  new session update is appended as the last user message, so consecutive
+ *  reviews share a byte-identical prefix — exactly what provider prompt
+ *  caching (OpenAI/Gemini automatic, Anthropic cache_control via pi-ai)
+ *  matches against. The messages this run added are returned as `appended`
+ *  for the runtime to persist. */
 export async function runAdvisorReview(
 	sessionUpdate: string,
 	model: Model<Api>,
-	auth: { apiKey?: string; headers?: Record<string, string> },
+	auth: AdvisorAuth,
 	cwd: string,
 	signal: AbortSignal,
 	config: AdvisorReviewConfig,
+	history: Message[] = [],
 ): Promise<AdvisorReviewResult> {
 	if (!auth.apiKey) {
 		return { advise: null, rounds: 0, error: "No API key for advisor model" };
@@ -106,10 +158,17 @@ export async function runAdvisorReview(
 	const reasoning = resolveAdvisorReasoning(model, config.thinking, config.thinkingLevel);
 	const complete = config.complete ?? completeSimple;
 	const maxRounds = Math.min(config.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
+	// pi ≥0.84: a credential may resolve a different endpoint than the catalog
+	// baseUrl (account-scoped gateways, Copilot Business/Enterprise, AI Gateway
+	// bindings). Mirror pi core's model runtime: clone the model with the
+	// resolved baseUrl so the advisor call hits the same endpoint the main
+	// agent would.
+	const resolvedModel = auth.baseUrl && auth.baseUrl !== model.baseUrl
+		? { ...model, baseUrl: auth.baseUrl }
+		: model;
 
-	const messages: Message[] = [
-		{ role: "user", content: sessionUpdate, timestamp: Date.now() },
-	];
+	const messages: Message[] = [...history, { role: "user", content: sessionUpdate, timestamp: Date.now() }];
+	const appended = (): Message[] => messages.slice(history.length);
 
 	let rounds = 0;
 	let advise: AdviseCapture | null = null;
@@ -122,13 +181,18 @@ export async function runAdvisorReview(
 		let response: AssistantMessage;
 		try {
 			response = await complete(
-				model,
+				resolvedModel,
 				{ systemPrompt, messages, tools },
 				{
 					apiKey: auth.apiKey,
+					// Forward headers unchanged: ProviderHeaders may carry `null`
+					// deletion markers that pi-ai applies when merging defaults.
 					headers: auth.headers,
+					env: auth.env,
 					signal,
 					reasoning,
+					// Stable per-session id → provider prompt-cache key / affinity routing.
+					sessionId: config.sessionId,
 				},
 			);
 		} catch (err) {
@@ -152,7 +216,12 @@ export async function runAdvisorReview(
 		// No tool calls → the advisor either spoke (ignored) or stayed silent.
 		// Either way the review is done; only an `advise` capture delivers advice.
 		if (toolCalls.length === 0) {
-			return { advise, rounds };
+			// Persist the advisor's final turn in the history copy when it has
+			// substantive content, so future reviews see what it said/did. An empty
+			// response is skipped — providers reject empty text blocks; consecutive
+			// user messages are merged by the API.
+			if (hasSubstantiveContent(response)) messages.push(response);
+			return { advise, rounds, appended: appended() };
 		}
 
 		// Feed the assistant turn back so tool results pair correctly.
@@ -190,7 +259,7 @@ export async function runAdvisorReview(
 
 		if (capturedThisRound) {
 			advise = capturedThisRound;
-			return { advise, rounds: rounds + 1 };
+			return { advise, rounds: rounds + 1, appended: appended() };
 		}
 
 		rounds++;
@@ -198,7 +267,16 @@ export async function runAdvisorReview(
 
 	// Hit the round cap without advising. Treat as silence rather than an error
 	// — the advisor explored but had nothing conclusive to raise.
-	return { advise, rounds };
+	return { advise, rounds, appended: appended() };
+}
+
+/** Whether an assistant message carries content worth persisting in history:
+ *  any tool call, any non-text block (e.g. thinking), or non-empty text. Empty
+ *  text-only responses are dropped — Anthropic rejects empty text content blocks. */
+function hasSubstantiveContent(response: AssistantMessage): boolean {
+	return response.content.some(
+		(c) => c.type !== "text" || (c.type === "text" && c.text.trim().length > 0),
+	);
 }
 
 /** Build a toolResult message for a tool call. */
