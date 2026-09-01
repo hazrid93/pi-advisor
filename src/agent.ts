@@ -102,6 +102,12 @@ export interface AdvisorReviewConfig {
 	/** Stable per-session identifier forwarded to the provider as a prompt-cache
 	 *  key / session-affinity id (see AdvisorComplete options). */
 	sessionId?: string;
+	/** Prompt-cache retention preference forwarded to pi-ai ("short" = Anthropic
+	 *  5m TTL / default; "long" = 1h TTL where supported — worth it when reviews
+	 *  are sparse, e.g. agent_settled-only cadences that can exceed 5 minutes;
+	 *  "none" disables cache markers AND session-affinity routing). Undefined
+	 *  leaves pi-ai's default ("short", or PI_CACHE_RETENTION=long env). */
+	cacheRetention?: "none" | "short" | "long";
 }
 
 /** The result of one advisor review. */
@@ -193,6 +199,8 @@ export async function runAdvisorReview(
 					reasoning,
 					// Stable per-session id → provider prompt-cache key / affinity routing.
 					sessionId: config.sessionId,
+					// Cache TTL preference ("long" = 1h on Anthropic for sparse cadences).
+					cacheRetention: config.cacheRetention,
 				},
 			);
 		} catch (err) {

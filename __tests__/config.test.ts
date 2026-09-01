@@ -261,3 +261,22 @@ describe("instructionsMode", () => {
 		expect(normalizeConfig({ enabled: true }).instructionsMode).toBe("project");
 	});
 });
+
+describe("cacheRetention", () => {
+	it("is unset by default (pi-ai's default / PI_CACHE_RETENTION env applies)", () => {
+		expect(DEFAULT_CONFIG.cacheRetention).toBeUndefined();
+		expect(normalizeConfig(null).cacheRetention).toBeUndefined();
+		expect(normalizeConfig({ enabled: true }).cacheRetention).toBeUndefined();
+	});
+
+	it("honors valid values", () => {
+		expect(normalizeConfig({ cacheRetention: "short" }).cacheRetention).toBe("short");
+		expect(normalizeConfig({ cacheRetention: "long" }).cacheRetention).toBe("long");
+		expect(normalizeConfig({ cacheRetention: "none" }).cacheRetention).toBe("none");
+	});
+
+	it("ignores unknown values (leaves the default in place)", () => {
+		expect(normalizeConfig({ cacheRetention: "forever" as unknown as "long" }).cacheRetention).toBeUndefined();
+		expect(normalizeConfig({ cacheRetention: 5 as unknown as "long" }).cacheRetention).toBeUndefined();
+	});
+});

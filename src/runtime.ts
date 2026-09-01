@@ -166,6 +166,10 @@ export class AdvisorRuntime {
 	/** Usage of the last completed review round (tokens incl. cache split), for
 	 *  /advisor status — makes prompt-cache effectiveness observable. */
 	#lastUsage: AssistantMessage["usage"] | null = null;
+	/** Cumulative usage across every review round this runtime has run (the
+	 *  session), so /advisor status can show the aggregate cache-hit rate rather
+	 *  than only the last round. Cleared with the conversation on reset(). */
+	#usageTotals = { reviews: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 	/** Last time a review was *started*, for the cooldown throttle (D3). */
 	#lastReviewAt = 0;
@@ -241,6 +245,12 @@ export class AdvisorRuntime {
 	 *  cacheRead/cacheWrite split), for /advisor status. */
 	get lastUsage(): AssistantMessage["usage"] | null {
 		return this.#lastUsage;
+	}
+
+	/** Cumulative usage across all review rounds this runtime has run, for
+	 *  /advisor status (aggregate cache-hit rate). */
+	get usageTotals(): { reviews: number; input: number; output: number; cacheRead: number; cacheWrite: number } {
+		return { ...this.#usageTotals };
 	}
 
 	/** How many turns the advisor is behind the main agent right now: the queued
@@ -588,6 +598,7 @@ export class AdvisorRuntime {
 		this.#contextChars = 0;
 		this.#advisorHistory = [];
 		this.#historyChars = 0;
+		this.#usageTotals = { reviews: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		this.#seenUserEntryIds.clear();
 		this.#pendingToolError = false;
 		this.#cancelMidPause();
@@ -752,8 +763,15 @@ export class AdvisorRuntime {
 			systemPrompt: this.config.systemPrompt,
 			projectInstructions: turn.projectInstructions,
 			sessionId: this.#sessionId,
+			cacheRetention: this.config.cacheRetention,
 			onUsage: (usage) => {
 				this.#lastUsage = usage;
+				const t = this.#usageTotals;
+				t.reviews++;
+				t.input += usage.input ?? 0;
+				t.output += usage.output ?? 0;
+				t.cacheRead += usage.cacheRead ?? 0;
+				t.cacheWrite += usage.cacheWrite ?? 0;
 			},
 		};
 	}

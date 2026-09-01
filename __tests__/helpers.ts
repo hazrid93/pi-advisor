@@ -88,7 +88,7 @@ export function readCall(path: string): ToolCall {
  */
 export function scriptableComplete(
 	script: AssistantMessage[],
-	onCall?: (model: Model<Api>, context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] }, options?: { reasoning?: string; apiKey?: string; sessionId?: string }) => void,
+	onCall?: (model: Model<Api>, context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] }, options?: { reasoning?: string; apiKey?: string; sessionId?: string; cacheRetention?: string }) => void,
 ): AdvisorComplete & { calls: { model: Model<Api>; messages: Message[]; reasoning?: string }[] } {
 	const calls: { model: Model<Api>; messages: Message[]; reasoning?: string }[] = [];
 	let i = 0;

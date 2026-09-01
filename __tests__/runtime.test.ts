@@ -62,7 +62,7 @@ type ReviewFn = (
 	auth: AdvisorAuth,
 	cwd: string,
 	signal: AbortSignal,
-	config: { maxToolRounds: number; thinking: boolean; thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh"; systemPrompt?: string; onUsage?: (usage: AssistantMessage["usage"]) => void; sessionId?: string },
+	config: { maxToolRounds: number; thinking: boolean; thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh"; systemPrompt?: string; onUsage?: (usage: AssistantMessage["usage"]) => void; sessionId?: string; cacheRetention?: "none" | "short" | "long" },
 	history?: Message[],
 ) => Promise<AdvisorReviewResult>;
 
@@ -99,7 +99,7 @@ const FAKE_MODEL: Model<Api> = {
 function makeRuntime(
 	review: ReviewFn,
 	branch: SessionEntry[] = [],
-	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; cooldownMs: number; syncLag: number; triggers: AdvisorTrigger[]; midPauseMs: number }> = {},
+	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; cooldownMs: number; syncLag: number; triggers: AdvisorTrigger[]; midPauseMs: number; cacheRetention: "none" | "short" | "long" }> = {},
 ) {
 	const sendAdvice = vi.fn(async (_notes: AdvisorNote[], _model: string, _opts?: { forceNonTriggering?: boolean }) => {});
 	const host = { sendAdvice };
@@ -119,6 +119,7 @@ function makeRuntime(
 			triggers: config.triggers ?? ["turn_end", "tool_error"],
 			midPauseMs: config.midPauseMs ?? 4000,
 			instructionsMode: "project",
+			cacheRetention: config.cacheRetention,
 		},
 		review as never,
 	);
@@ -522,6 +523,45 @@ describe("AdvisorRuntime — history prefix (prompt-cache invariants)", () => {
 		await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
 		await settle(rt);
 		expect(rt.lastUsage).toEqual(usage);
+	});
+
+	it("accumulates session-wide usage totals (aggregate cache-hit rate) across reviews", async () => {
+		const usages = [
+			{ input: 1000, output: 30, cacheRead: 0, cacheWrite: 1000 },   // cold: full write
+			{ input: 1200, output: 40, cacheRead: 1000, cacheWrite: 200 },  // warm: prefix hit
+			{ input: 1400, output: 50, cacheRead: 1200, cacheWrite: 200 },  // warm again
+		] as AssistantMessage["usage"][];
+		let i = 0;
+		const review: ReviewFn = async (_t, _m, _a, _c, _s, cfg) => {
+			cfg.onUsage?.(usages[i++]);
+			return { advise: null, rounds: 0 };
+		};
+		const { rt, ctx } = makeRuntime(review);
+		for (let k = 0; k < 3; k++) {
+			const t = turn(`t${k}`);
+			await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+			await settle(rt);
+		}
+		expect(rt.usageTotals).toEqual({
+			reviews: 3,
+			input: 3600,
+			output: 120,
+			cacheRead: 2200,
+			cacheWrite: 1400,
+		});
+	});
+
+	it("passes the configured cacheRetention through to the review config", async () => {
+		let seen: string | undefined;
+		const review: ReviewFn = async (_t, _m, _a, _c, _s, cfg) => {
+			seen = (cfg as { cacheRetention?: string }).cacheRetention;
+			return { advise: null, rounds: 0 };
+		};
+		const { rt, ctx } = makeRuntime(review, [], { cacheRetention: "long" });
+		const t = turn("x");
+		await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+		await settle(rt);
+		expect(seen).toBe("long");
 	});
 });
 

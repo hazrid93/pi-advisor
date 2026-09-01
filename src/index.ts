@@ -213,6 +213,14 @@ export interface AdvisorConfig {
 	 *  (default; opt-OUT of global); "global" = the per-user global file
 	 *  (`/advisor instructions global …`); "none" = neither. */
 	instructionsMode: AdvisorInstructionsMode;
+	/** Prompt-cache retention for advisor reviews, forwarded to pi-ai.
+	 *  "short" (default) = Anthropic 5m TTL — right for every-turn cadences
+	 *  (each hit refreshes the TTL). "long" = 1h TTL where the model supports
+	 *  it — worth it for sparse cadences (agent_settled-only, long quiet
+	 *  periods) where reviews can land >5 minutes apart and the cached prefix
+	 *  would otherwise expire. "none" disables cache markers and session-
+	 *  affinity routing. Unset = pi-ai default ("short", or PI_CACHE_RETENTION=long). */
+	cacheRetention?: "none" | "short" | "long";
 }
 
 /** Recommended rolling transcript budget: about 6k tokens for typical code/chat. */
@@ -251,6 +259,8 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	triggers: [...DEFAULT_TRIGGERS],
 	midPauseMs: DEFAULT_MID_PAUSE_MS,
 	instructionsMode: "project",
+	// cacheRetention intentionally absent: pi-ai's default ("short", or the
+	// PI_CACHE_RETENTION env) applies unless the user opts in.
 };
 
 /** Parse/validate the `triggers` array from raw config. Unknown entries are
@@ -364,6 +374,11 @@ export function normalizeConfig(raw: unknown): AdvisorConfig {
 	// default so old config files (pre-mode) keep using project instructions.
 	if (obj.instructionsMode === "global" || obj.instructionsMode === "none" || obj.instructionsMode === "project") {
 		base.instructionsMode = obj.instructionsMode;
+	}
+	// `cacheRetention`: only exact valid values are honored; anything else
+	// (including old configs) leaves pi-ai's default in place.
+	if (obj.cacheRetention === "none" || obj.cacheRetention === "short" || obj.cacheRetention === "long") {
+		base.cacheRetention = obj.cacheRetention;
 	}
 	return base;
 }

@@ -149,6 +149,17 @@ describe("runAdvisorReview", () => {
 		expect(seen?.sessionId).toBe("advisor-session-1");
 	});
 
+	it("forwards cacheRetention to the completion options (Anthropic 1h TTL for sparse cadences)", async () => {
+		const model = fakeModel();
+		let seen: { cacheRetention?: string } | undefined;
+		const complete = scriptableComplete([textAssistant("ok")], (_m, _c, options) => {
+			seen = options;
+		});
+		const t = fakeTurn(model, complete);
+		await runAdvisorReview("u", t.model, t.auth, t.cwd, t.signal, { ...t.config, cacheRetention: "long" });
+		expect(seen?.cacheRetention).toBe("long");
+	});
+
 	it("uses the model's catalog baseUrl when no credential endpoint is resolved", async () => {
 		const model = fakeModel({ baseUrl: "http://localhost" });
 		const complete = scriptableComplete([textAssistant("ok")]);

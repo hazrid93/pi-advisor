@@ -200,8 +200,29 @@ own notes, and its read/grep/find results are read from cache at the
 provider's discounted rate.
 
 `/advisor status` shows the last review's token usage with its cache split
-(`cache N read / M write`), so you can watch the hit rate. High cache-read on
-an Anthropic/OpenAI advisor model means the prefix is being reused.
+(`cache N read / M write`) plus session-wide totals with the aggregate hit
+rate, so you can watch the prefix being reused. High cache-read on an
+Anthropic/OpenAI advisor model means the prefix is hitting.
+
+Two tuning levers:
+
+- **`cacheRetention`** (config): Anthropic's default cache TTL is 5 minutes
+  (`"short"`). Every-turn cadences keep it warm naturally (each hit refreshes
+  the TTL), but sparse setups — `agent_settled`-only triggers, long quiet
+  gaps — can exceed 5 minutes between reviews and cold-prefill every time.
+  `"long"` raises the TTL to 1 hour on models that support it. `"none"`
+  disables cache markers and session-affinity routing entirely.
+- **Keep the advisor model + instructions stable mid-session**: the system
+  prompt and tools are the head of the cached prefix; changing the advisor
+  model or `.pi/advisor.md` starts a fresh cache (the runtime also resets the
+  conversation on model/config changes, so behavior stays consistent).
+
+Known bound: tool results larger than 10k chars are truncated in the
+*persisted* history copy (the live review saw the full result). The next
+request diverges at that message, so the cache falls back to the previous
+review's breakpoint — roughly one review cycle is re-processed, then the
+prefix is warm again. Rare, bounded, and the price of keeping the history
+budget predictable.
 
 ## Project-scoped advisor instructions
 
@@ -337,7 +358,8 @@ Example:
   "maxToolRounds": 6,
   "maxRetries": 3,
   "interrupting": true,
-  "syncLag": 0
+  "syncLag": 0,
+  "cacheRetention": "short"
 }
 ```
 
@@ -353,6 +375,7 @@ Example:
 | `maxRetries` | `3` | Consecutive failures before the backlog is dropped |
 | `interrupting` | `true` | Whether every advisory immediately triggers a turn |
 | `syncLag` | `0` | Backlog threshold before the main agent waits; `0` never waits |
+| `cacheRetention` | `"short"` | Prompt-cache TTL preference forwarded to pi-ai: `"short"` (Anthropic 5m, default), `"long"` (1h where supported — for sparse review cadences), `"none"` (disable cache markers + session affinity). Unset also honors pi-ai's `PI_CACHE_RETENTION` env |
 | `systemPrompt` | built in | Optional full advisor system-prompt override |
 
 The global config path follows pi's `getAgentDir()` and therefore respects `PI_CODING_AGENT_DIR`.

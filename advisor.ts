@@ -919,6 +919,10 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	if (runtime) {
 		lines.push(`  backlog now: ${runtime.lag} turn(s)${runtime.isBusy ? " (review in flight)" : ""}`);
 	}
+	lines.push(
+		`Cache retention: ${config.cacheRetention ?? "short (pi-ai default)"}` +
+			(config.cacheRetention === "long" ? " — 1h TTL where supported (good for sparse review cadences)" : ""),
+	);
 
 	const active = config.enabled && !!config.advisorModel;
 	lines.push(`Active: ${active ? "yes" : "no"}`);
@@ -937,6 +941,17 @@ function showStatus(ctx: ExtensionCommandContext): void {
 				? ` · cache ${fmt(usage.cacheRead)} read / ${fmt(usage.cacheWrite)} write`
 					: " · cache 0 (provider did not report prompt caching)";
 			lines.push(`Last review usage: ${fmt(usage.input)} in${cache} · ${fmt(usage.output)} out tokens`);
+		}
+		// Session-wide aggregate: the cache-hit rate across every review round is
+		// the number that actually reflects the append-only prefix design.
+		const totals = rt.usageTotals;
+		if (totals.reviews > 0) {
+			const fmt = (n: number) => n.toLocaleString();
+			const hitRate = totals.input > 0 ? Math.round((totals.cacheRead / totals.input) * 100) : 0;
+			lines.push(
+				`Session totals: ${totals.reviews} review round(s) · ${fmt(totals.input)} in ` +
+				`(${fmt(totals.cacheRead)} from cache · ${hitRate}% hit) · ${fmt(totals.output)} out tokens`,
+			);
 		}
 	} else {
 		lines.push("Runtime: not started yet (no turn reviewed)");
