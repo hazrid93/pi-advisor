@@ -304,4 +304,16 @@ describe("parseAdvisorCooldownMs", () => {
 		expect(parseAdvisorCooldownMs("999m")).toBeNull(); // beyond MAX_COOLDOWN_MS
 		expect(parseAdvisorCooldownMs("")).toBeNull();
 	});
+
+	it("ships cost-safe defaults (advisor must not out-call the main model)", () => {
+		// 2 rounds covers list/grep → read without long tool chains; 30s caps
+		// turn_end-heavy runs at ~2 reviews/min while coalescing every burst.
+		expect(DEFAULT_CONFIG.maxToolRounds).toBe(2);
+		expect(DEFAULT_CONFIG.cooldownMs).toBe(30_000);
+		expect(normalizeConfig({}).maxToolRounds).toBe(2);
+		expect(normalizeConfig({}).cooldownMs).toBe(30_000);
+		// Explicit old values still round-trip (user choice is preserved).
+		expect(normalizeConfig({ cooldownMs: 0, maxToolRounds: 6 }).cooldownMs).toBe(0);
+		expect(normalizeConfig({ cooldownMs: 0, maxToolRounds: 6 }).maxToolRounds).toBe(6);
+	});
 });

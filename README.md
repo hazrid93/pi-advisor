@@ -318,8 +318,8 @@ mid-run inactivity; a fluid run that never pauses fires nothing from it.
 | `/advisor interrupting [on\|off]` | Control whether all advice immediately triggers a main-agent turn |
 | `/advisor sync <0-6>` | Pause the main loop when the advisor falls this many turns behind; `0` disables waiting |
 | `/advisor context [chars\|Nk\|default]` | Inspect or set the advisor conversation budget |
-| `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `6`; each round is an extra LLM call — lower = cheaper) |
-| `/advisor cooldown [30000\|30s\|1m\|off]` | Minimum gap between reviews; turns inside the gap coalesce into one review (default off) |
+| `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `2`; each round is an extra LLM call — lower = cheaper) |
+| `/advisor cooldown [30000\|30s\|1m\|off]` | Minimum gap between reviews; turns inside the gap coalesce into one review (default `30s`; `off` reviews every turn) |
 | `/advisor triggers [name]` | Toggle review triggers (default: `turn_end`, `tool_error`) |
 | `/advisor instructions [show\|set <text>\|edit\|clear]` | Manage project-scoped advisor guidance |
 | `/advisor instructions global [show\|set <text>\|edit\|clear]` | Manage global (cross-repo) advisor guidance |
@@ -356,8 +356,8 @@ Example:
   "thinking": false,
   "thinkingLevel": "medium",
   "contextChars": 24000,
-  "cooldownMs": 0,
-  "maxToolRounds": 6,
+  "cooldownMs": 30000,
+  "maxToolRounds": 2,
   "maxRetries": 3,
   "interrupting": true,
   "syncLag": 0,
@@ -372,8 +372,8 @@ Example:
 | `thinking` | `false` | Enable advisor reasoning when supported by the model |
 | `thinkingLevel` | `"medium"` | Reasoning effort |
 | `contextChars` | `24000` | Advisor conversation budget (append-only, cache-friendly; oldest half dropped at once when exceeded) |
-| `cooldownMs` | `0` | Minimum delay between reviews; `0` reviews every completed turn |
-| `maxToolRounds` | `6` | Maximum read-only exploration rounds; hard-capped at 12 |
+| `cooldownMs` | `30000` | Minimum gap between reviews; turns inside the gap coalesce into one review (nothing dropped); `0` reviews every completed turn |
+| `maxToolRounds` | `2` | Maximum read-only exploration rounds per review; each round is an extra LLM call — the main per-review cost lever; hard-capped at 12 |
 | `maxRetries` | `3` | Consecutive failures before the backlog is dropped |
 | `interrupting` | `true` | Whether every advisory immediately triggers a turn |
 | `syncLag` | `0` | Backlog threshold before the main agent waits; `0` never waits |
@@ -422,7 +422,7 @@ The queue is single-flight, so advisor reviews never overlap. Epoch guards disca
 | Model is not found | Run `/advisor` and select from the live available-model list |
 | No API key | Configure the provider through pi (`/login` or its environment variable) |
 | Advisor says nothing | Silence is expected when work is on track; inspect `/advisor status` or try a stronger model |
-| Reviews are expensive or slow | Lower context with `/advisor context 12k`, disable thinking, or set a cooldown in the config |
+| Reviews are expensive or slow | Lower context with `/advisor context 12k`, disable thinking, set `/advisor rounds 1`, or raise the throttle with `/advisor cooldown 1m` |
 | Advisor misses earlier requirements | Increase context with `/advisor context 50k`; only post-start/reload prompts are accumulated |
 | Repeated review failures | Fix provider/rate-limit issues or choose another model; the backlog drops after three failures by default |
 | Project instruction is ignored | Ensure the project is trusted and check `/advisor instructions show` |

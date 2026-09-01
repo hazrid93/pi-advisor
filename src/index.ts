@@ -245,14 +245,30 @@ export function parseAdvisorContextSize(value: string): number | null {
 	return chars;
 }
 
+/** Default minimum gap between advisor reviews. Turns arriving inside the gap
+ *  coalesce into the next eligible review (deltas merge, nothing is dropped),
+ *  so this throttles review FREQUENCY without losing coverage. 30s caps
+ *  turn_end-heavy runs at ~2 reviews/minute — the default guard against the
+ *  advisor out-calling the main model on tool-heavy bursts. `/advisor
+ *  cooldown off` restores review-every-turn behavior. */
+export const DEFAULT_COOLDOWN_MS = 30_000;
+
+/** Default max read-only tool rounds per review. Each round is an extra
+ *  advisor LLM call re-sending the growing conversation, so this is the
+ *  biggest per-review cost multiplier. 2 covers the common explore pattern
+ *  (list/grep → read) without the long tool-chains that make reviews
+ *  out-cost main-model turns; the loop can always stop earlier on its own.
+ *  `/advisor rounds 6` restores the old ceiling. */
+export const DEFAULT_MAX_TOOL_ROUNDS = 2;
+
 export const DEFAULT_CONFIG: AdvisorConfig = {
 	enabled: true,
 	advisorModel: null,
 	thinking: false,
 	thinkingLevel: "medium",
 	contextChars: RECOMMENDED_CONTEXT_CHARS,
-	cooldownMs: 0,
-	maxToolRounds: 6,
+	cooldownMs: DEFAULT_COOLDOWN_MS,
+	maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
 	maxRetries: 3,
 	interrupting: true,
 	syncLag: 0,
@@ -280,6 +296,13 @@ export function parseAdvisorCooldownMs(value: string): number | null {
 	const ms = Math.floor(Number(match[1]) * multiplier);
 	if (!Number.isSafeInteger(ms) || ms < 0 || ms > MAX_COOLDOWN_MS) return null;
 	return ms;
+}
+
+/** Format a cooldown for display (status lines): "30s", "1m", raw ms under 1s. */
+export function formatCooldownMs(ms: number): string {
+	if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`;
+	if (ms >= 1_000 && ms % 1_000 === 0) return `${ms / 1_000}s`;
+	return `${ms}ms`;
 }
 
 /** Parse/validate the `triggers` array from raw config. Unknown entries are
@@ -347,7 +370,8 @@ export function normalizeConfig(raw: unknown): AdvisorConfig {
 	if (
 		typeof obj.cooldownMs === "number" &&
 		Number.isFinite(obj.cooldownMs) &&
-		obj.cooldownMs >= 0
+		obj.cooldownMs >= 0 &&
+		obj.cooldownMs <= MAX_COOLDOWN_MS
 	) {
 		base.cooldownMs = Math.floor(obj.cooldownMs);
 	}

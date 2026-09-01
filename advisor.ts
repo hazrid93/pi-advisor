@@ -33,6 +33,9 @@ import {
 	ADVISOR_COMMAND_DESCRIPTION,
 	ADVISOR_TRIGGERS,
 	ADVISOR_TRIGGER_LABELS,
+	DEFAULT_COOLDOWN_MS,
+	DEFAULT_MAX_TOOL_ROUNDS,
+	formatCooldownMs,
 	formatModelRef,
 	MAX_CONTEXT_CHARS,
 	MAX_COOLDOWN_MS,
@@ -386,11 +389,11 @@ async function handleAdvisorCommand(
 			"                                (0 = never wait, default; 1 = after every turn)",
 				"  /advisor context [chars|Nk|default]",
 				"                          Set rolling transcript size (default: 24k chars)",
-				"  /advisor rounds [0-12]   Max advisor tool rounds per review (default: 6)",
+				"  /advisor rounds [0-12]   Max advisor tool rounds per review (default: 2)",
 				"                          Each round is an extra LLM call — lower = cheaper",
 				"  /advisor cooldown [30000|30s|1m|off]",
 				"                          Minimum gap between reviews; turns inside the gap",
-				"                          coalesce into one review, not dropped (default: off)",
+				"                          coalesce into one review, not dropped (default: 30s)",
 				"  /advisor thinking <off|minimal|low|medium|high|xhigh>",
 				"                          Set the advisor's thinking effort (off = disabled)",
 				"  /advisor triggers [name] Toggle review triggers (default: turn_end, tool_error)",
@@ -866,9 +869,9 @@ function handleRounds(ctx: ExtensionCommandContext, rest: string): void {
 	const arg = rest.trim().toLowerCase();
 	if (!arg) {
 		ctx.ui.notify(
-			`Advisor max tool rounds: ${config.maxToolRounds} per review (hard cap ${ABSOLUTE_MAX_ROUNDS}).\n` +
+			`Advisor max tool rounds: ${config.maxToolRounds} per review (default ${DEFAULT_MAX_TOOL_ROUNDS}, hard cap ${ABSOLUTE_MAX_ROUNDS}).\n` +
 				`Each round is an extra advisor LLM call re-sending the conversation.\n` +
-				`0 = review without exploring; 2 is plenty for most setups.\n` +
+				`0 = review without exploring; 2 covers the common list/grep → read pattern.\n` +
 				`Usage: /advisor rounds <0-${ABSOLUTE_MAX_ROUNDS}>`,
 			"info",
 		);
@@ -896,7 +899,7 @@ function handleCooldown(ctx: ExtensionCommandContext, rest: string): void {
 	const arg = rest.trim().toLowerCase();
 	if (!arg) {
 		ctx.ui.notify(
-			`Advisor cooldown: ${config.cooldownMs === 0 ? "off (review every turn)" : `${config.cooldownMs.toLocaleString()}ms`}.\n` +
+			`Advisor cooldown: ${config.cooldownMs === 0 ? "off (review every turn)" : `${formatCooldownMs(config.cooldownMs)}`} (default ${formatCooldownMs(DEFAULT_COOLDOWN_MS)}).\n` +
 				`Turns arriving inside the gap coalesce into one review — nothing is dropped.\n` +
 				`Usage: /advisor cooldown <30000|30s|1m|off>  (max ${(MAX_COOLDOWN_MS / 60000).toLocaleString()}m)`,
 			"info",
@@ -1005,7 +1008,7 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	);
 	lines.push(
 		`Limits: max ${config.maxToolRounds} tool round(s)/review` +
-			` · cooldown ${config.cooldownMs === 0 ? "off" : `${config.cooldownMs.toLocaleString()}ms`}` +
+			` · cooldown ${config.cooldownMs === 0 ? "off" : formatCooldownMs(config.cooldownMs)}` +
 			`  (/advisor rounds, /advisor cooldown)`,
 	);
 
