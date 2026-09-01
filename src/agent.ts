@@ -127,8 +127,9 @@ export interface AdvisorReviewResult {
 	appended?: Message[];
 }
 
-/** Hard cap on total loop iterations even if maxToolRounds is set very high. */
-const ABSOLUTE_MAX_ROUNDS = 12;
+/** Hard cap on total loop iterations even if maxToolRounds is set very high.
+ *  Exported so `/advisor rounds` can validate against the same ceiling. */
+export const ABSOLUTE_MAX_ROUNDS = 12;
 
 /** Run one advisor review. Returns the captured advice (or null for silence).
  *

@@ -35,8 +35,10 @@ import {
 	ADVISOR_TRIGGER_LABELS,
 	formatModelRef,
 	MAX_CONTEXT_CHARS,
+	MAX_COOLDOWN_MS,
 	MIN_CONTEXT_CHARS,
 	parseAdvisorContextSize,
+	parseAdvisorCooldownMs,
 	parseModelRef,
 	RECOMMENDED_CONTEXT_CHARS,
 	readConfig,
@@ -48,6 +50,7 @@ import { AdvisorModelSelectorComponent, TriggersSelectorComponent, type Triggers
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI, KeybindingsManager } from "@earendil-works/pi-tui";
 import { AdvisorRuntime, makeHost, summarizeResult, type AdvisorRuntimeHost } from "./src/runtime.js";
+import { ABSOLUTE_MAX_ROUNDS } from "./src/agent.js";
 import { lastTurnFromBranch } from "./src/transcript.js";
 import { getProjectInstructionsPath, readProjectInstructions, writeProjectInstructions } from "./src/project-instructions.js";
 import {
@@ -250,6 +253,8 @@ const ADVISOR_SUBCOMMANDS: { value: string; description: string }[] = [
 	{ value: "interrupting", description: "Toggle whether ALL advice interrupts (default: on)" },
 	{ value: "sync", description: "Wait for the advisor when it falls N turns behind (0-6)" },
 	{ value: "context", description: "Inspect or set the rolling transcript budget" },
+	{ value: "rounds", description: "Max advisor tool rounds per review (0-12) — lower = cheaper" },
+	{ value: "cooldown", description: "Minimum gap between reviews (30000|30s|1m|off)" },
 	{ value: "thinking", description: "Set the advisor thinking effort (off|minimal|low|medium|high|xhigh)" },
 	{ value: "triggers", description: "Toggle review triggers (default: turn_end, tool_error)" },
 	{ value: "instructions", description: "Manage project + global advisor guidance and active mode" },
@@ -381,6 +386,11 @@ async function handleAdvisorCommand(
 			"                                (0 = never wait, default; 1 = after every turn)",
 				"  /advisor context [chars|Nk|default]",
 				"                          Set rolling transcript size (default: 24k chars)",
+				"  /advisor rounds [0-12]   Max advisor tool rounds per review (default: 6)",
+				"                          Each round is an extra LLM call — lower = cheaper",
+				"  /advisor cooldown [30000|30s|1m|off]",
+				"                          Minimum gap between reviews; turns inside the gap",
+				"                          coalesce into one review, not dropped (default: off)",
 				"  /advisor thinking <off|minimal|low|medium|high|xhigh>",
 				"                          Set the advisor's thinking effort (off = disabled)",
 				"  /advisor triggers [name] Toggle review triggers (default: turn_end, tool_error)",
@@ -438,6 +448,16 @@ async function handleAdvisorCommand(
 
 	if (sub === "context" || sub === "window") {
 		handleContext(ctx, rest);
+		return;
+	}
+
+	if (sub === "rounds" || sub === "round") {
+		handleRounds(ctx, rest);
+		return;
+	}
+
+	if (sub === "cooldown" || sub === "throttle") {
+		handleCooldown(ctx, rest);
 		return;
 	}
 
@@ -837,6 +857,66 @@ function handleSync(ctx: ExtensionCommandContext, rest: string): void {
 	);
 }
 
+/** Set the max read-only tool rounds the advisor may take per review. Each
+ *  round is an extra LLM call that re-sends the growing conversation, so this
+ *  is the biggest per-review cost multiplier — the main knob for "advisor is
+ *  calling the model too much". 0 = the advisor reviews without exploring
+ *  (no tool calls; judge from the transcript alone). */
+function handleRounds(ctx: ExtensionCommandContext, rest: string): void {
+	const arg = rest.trim().toLowerCase();
+	if (!arg) {
+		ctx.ui.notify(
+			`Advisor max tool rounds: ${config.maxToolRounds} per review (hard cap ${ABSOLUTE_MAX_ROUNDS}).\n` +
+				`Each round is an extra advisor LLM call re-sending the conversation.\n` +
+				`0 = review without exploring; 2 is plenty for most setups.\n` +
+				`Usage: /advisor rounds <0-${ABSOLUTE_MAX_ROUNDS}>`,
+			"info",
+		);
+		return;
+	}
+	const n = Number(arg);
+	if (!Number.isFinite(n) || n < 0 || n > ABSOLUTE_MAX_ROUNDS || !Number.isInteger(n)) {
+		ctx.ui.notify(`Invalid rounds: "${arg}". Use an integer 0-${ABSOLUTE_MAX_ROUNDS}.`, "error");
+		return;
+	}
+	updateConfig(
+		ctx,
+		(c) => ({ ...c, maxToolRounds: n }),
+		n === 0
+			? `Advisor tool rounds disabled — it will judge from the transcript without exploring.`
+			: `Advisor may take up to ${n} tool round(s) per review.`,
+	);
+}
+
+/** Set the minimum gap between advisor reviews. Turns arriving inside the gap
+ *  are coalesced into the next eligible review (their deltas merge, nothing is
+ *  dropped) — the throttle for turn_end-heavy setups where the advisor fires
+ *  far more often than the main model. 0/off = review every turn (default). */
+function handleCooldown(ctx: ExtensionCommandContext, rest: string): void {
+	const arg = rest.trim().toLowerCase();
+	if (!arg) {
+		ctx.ui.notify(
+			`Advisor cooldown: ${config.cooldownMs === 0 ? "off (review every turn)" : `${config.cooldownMs.toLocaleString()}ms`}.\n` +
+				`Turns arriving inside the gap coalesce into one review — nothing is dropped.\n` +
+				`Usage: /advisor cooldown <30000|30s|1m|off>  (max ${(MAX_COOLDOWN_MS / 60000).toLocaleString()}m)`,
+			"info",
+		);
+		return;
+	}
+	const ms = parseAdvisorCooldownMs(arg);
+	if (ms === null) {
+		ctx.ui.notify(`Invalid cooldown: "${arg}". Try 30000, 30s, 1m, or off.`, "error");
+		return;
+	}
+	updateConfig(
+		ctx,
+		(c) => ({ ...c, cooldownMs: ms }),
+		ms === 0
+			? `Advisor cooldown off — reviews every completed turn.`
+			: `Advisor cooldown ${ms.toLocaleString()}ms — turns inside the gap coalesce into one review.`,
+	);
+}
+
 /** Interactive model picker. A fuzzy-searchable, scrollable TUI (built on
  *  pi-tui) listing every available model — reasoning-capable + current ones
  *  float to the top, the current model is marked ✓, and a leading "None"
@@ -922,6 +1002,11 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	lines.push(
 		`Cache retention: ${config.cacheRetention ?? "short (pi-ai default)"}` +
 			(config.cacheRetention === "long" ? " — 1h TTL where supported (good for sparse review cadences)" : ""),
+	);
+	lines.push(
+		`Limits: max ${config.maxToolRounds} tool round(s)/review` +
+			` · cooldown ${config.cooldownMs === 0 ? "off" : `${config.cooldownMs.toLocaleString()}ms`}` +
+			`  (/advisor rounds, /advisor cooldown)`,
 	);
 
 	const active = config.enabled && !!config.advisorModel;

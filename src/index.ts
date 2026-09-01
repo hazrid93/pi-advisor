@@ -263,6 +263,25 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	// PI_CACHE_RETENTION env) applies unless the user opts in.
 };
 
+/** Upper bound for the review cooldown (10 minutes) — above this the advisor
+ *  effectively stops reviewing during active work. */
+export const MAX_COOLDOWN_MS = 600_000;
+
+/** Parse a cooldown value for `/advisor cooldown`: milliseconds ("30000",
+ *  "500ms"), seconds ("30s"), minutes ("1m", "1.5m"), or off ("0", "off",
+ *  "none", "default"). Returns ms in [0, MAX_COOLDOWN_MS], or null if invalid. */
+export function parseAdvisorCooldownMs(value: string): number | null {
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "off" || normalized === "none" || normalized === "default" || normalized === "0") return 0;
+	const match = normalized.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/);
+	if (!match) return null;
+	const unit = match[2];
+	const multiplier = unit === "m" ? 60_000 : unit === "s" ? 1_000 : 1;
+	const ms = Math.floor(Number(match[1]) * multiplier);
+	if (!Number.isSafeInteger(ms) || ms < 0 || ms > MAX_COOLDOWN_MS) return null;
+	return ms;
+}
+
 /** Parse/validate the `triggers` array from raw config. Unknown entries are
  *  dropped; de-duplicated preserving order; falls back to defaults if empty. */
 function normalizeTriggers(raw: unknown): AdvisorTrigger[] {

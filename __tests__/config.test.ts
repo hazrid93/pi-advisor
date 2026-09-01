@@ -9,6 +9,7 @@ import {
 	isInterruptingSeverity,
 	normalizeConfig,
 	parseAdvisorContextSize,
+	parseAdvisorCooldownMs,
 	parseModelRef,
 	formatModelRef,
 	DEFAULT_CONFIG,
@@ -278,5 +279,29 @@ describe("cacheRetention", () => {
 	it("ignores unknown values (leaves the default in place)", () => {
 		expect(normalizeConfig({ cacheRetention: "forever" as unknown as "long" }).cacheRetention).toBeUndefined();
 		expect(normalizeConfig({ cacheRetention: 5 as unknown as "long" }).cacheRetention).toBeUndefined();
+	});
+});
+
+describe("parseAdvisorCooldownMs", () => {
+	it("parses milliseconds, seconds, and minutes", () => {
+		expect(parseAdvisorCooldownMs("30000")).toBe(30_000);
+		expect(parseAdvisorCooldownMs("500ms")).toBe(500);
+		expect(parseAdvisorCooldownMs("30s")).toBe(30_000);
+		expect(parseAdvisorCooldownMs("1m")).toBe(60_000);
+		expect(parseAdvisorCooldownMs("1.5m")).toBe(90_000);
+	});
+
+	it("off synonyms map to 0 (review every turn)", () => {
+		expect(parseAdvisorCooldownMs("0")).toBe(0);
+		expect(parseAdvisorCooldownMs("off")).toBe(0);
+		expect(parseAdvisorCooldownMs("none")).toBe(0);
+		expect(parseAdvisorCooldownMs("default")).toBe(0);
+	});
+
+	it("rejects invalid or out-of-range values", () => {
+		expect(parseAdvisorCooldownMs("soon")).toBeNull();
+		expect(parseAdvisorCooldownMs("-5s")).toBeNull();
+		expect(parseAdvisorCooldownMs("999m")).toBeNull(); // beyond MAX_COOLDOWN_MS
+		expect(parseAdvisorCooldownMs("")).toBeNull();
 	});
 });

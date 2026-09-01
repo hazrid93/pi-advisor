@@ -318,6 +318,8 @@ mid-run inactivity; a fluid run that never pauses fires nothing from it.
 | `/advisor interrupting [on\|off]` | Control whether all advice immediately triggers a main-agent turn |
 | `/advisor sync <0-6>` | Pause the main loop when the advisor falls this many turns behind; `0` disables waiting |
 | `/advisor context [chars\|Nk\|default]` | Inspect or set the advisor conversation budget |
+| `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `6`; each round is an extra LLM call — lower = cheaper) |
+| `/advisor cooldown [30000\|30s\|1m\|off]` | Minimum gap between reviews; turns inside the gap coalesce into one review (default off) |
 | `/advisor triggers [name]` | Toggle review triggers (default: `turn_end`, `tool_error`) |
 | `/advisor instructions [show\|set <text>\|edit\|clear]` | Manage project-scoped advisor guidance |
 | `/advisor instructions global [show\|set <text>\|edit\|clear]` | Manage global (cross-repo) advisor guidance |
