@@ -4,16 +4,16 @@
 
 **A second model that reviews your main [pi](https://github.com/earendil-works/pi-coding-agent) agent and injects concise, actionable advice.**
 
-[![pi extension](https://img.shields.io/badge/pi-extension-blueviolet)](https://github.com/earendil-works/pi-coding-agent)
+[![npm version](https://img.shields.io/npm/v/%40hazrid1993%2Fpi-advisor?logo=npm&label=npm)](https://www.npmjs.com/package/@hazrid1993/pi-advisor)
+[![npm downloads](https://img.shields.io/npm/dm/%40hazrid1993%2Fpi-advisor?label=npm%20downloads)](https://www.npmjs.com/package/@hazrid1993/pi-advisor)
+[![Pi package](https://img.shields.io/badge/Pi-package_catalog-8A2BE2)](https://pi.dev/packages/@hazrid1993/pi-advisor)
 [![pi 0.80+](https://img.shields.io/badge/pi-%3E%3D0.80-8A2BE2)](https://github.com/earendil-works/pi-coding-agent)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-![npm version](https://img.shields.io/npm/v/@hazrid1993/pi-advisor?style=flat-square)
-
-![npm downloads](https://img.shields.io/npm/dm/@hazrid1993/pi-advisor?style=flat-square&label=npm%20downloads)
-
-
 </div>
+
+> [!NOTE]
+> **Official release:** [`@hazrid1993/pi-advisor`](https://www.npmjs.com/package/@hazrid1993/pi-advisor) is published on npm and listed in the [Pi package catalog](https://pi.dev/packages/@hazrid1993/pi-advisor).
 
 ## What it does
 
@@ -29,12 +29,37 @@ The advisor:
 
 Advice is framed as guidance for the main agent to weigh—not blindly obey.
 
+## Research: why a paired LLM improves coding results
+
+The two-model design is backed by peer-reviewed research. [**PairCoder: Pair Programming-Inspired Two-Agent Collaboration for Code Generation**](https://aclanthology.org/2026.findings-acl.149.pdf) (Chen et al., [Findings of ACL 2026](https://aclanthology.org/2026.findings-acl.149/)) shows that pairing two LLMs — one generating code, the other reviewing it — measurably beats single-model inference on coding tasks.
+
+Reported results:
+
+| Result | Detail |
+|---|---|
+| Higher accuracy | Up to **20.3%** improvement in pass@1 over single-model inference; **91.0%** pass@1 on HumanEval across eight representative backbones |
+| Consistent gains | Improvements hold across **13 LLMs**, so the effect is not specific to one model family |
+| Cheaper than heavy multi-agent setups | **40–70% fewer tokens** than multi-agent baselines while still outperforming them |
+| Heterogeneous pairs shine | Many pairings of *different* models outperform **both** constituent models |
+
+What this means for `pi-advisor`:
+
+- **Generator + reviewer beats a lone generator.** PairCoder's two-agent split — one model writes, one reviews — is exactly the shape `pi-advisor` gives pi: the main agent codes, the advisor model reviews every turn and catches what tunnel vision misses.
+- **The reviewer can (and often should) be a different model.** PairCoder found heterogeneous pairings frequently beat both constituent models — one reason `/advisor` lets you pick any model rather than a copy of the main agent.
+- **Lightweight beats heavyweight.** PairCoder achieves its gains with 40–70% fewer tokens than multi-agent frameworks. `pi-advisor` follows the same deployment-conscious philosophy: a bounded rolling transcript (default 24,000 characters), read-only exploration, and silence when the main agent is already on track.
+
+One honest difference: PairCoder alternates the two models between coder and reviewer roles when repeated errors signal a stalled interaction. `pi-advisor` keeps the roles fixed — the main agent always drives, the advisor always reviews — because in an interactive session the human decides when to change course.
+
+> Chen, Junhao, Xiang Li, Yibin Xu, Yuehan Cui, Fangsheng Weng, Hao Zhao, Fei Ma, and Qi Tian. 2026. *PairCoder: Pair Programming-Inspired Two-Agent Collaboration for Code Generation.* In *Findings of the Association for Computational Linguistics: ACL 2026*, pages 3043–3058, San Diego, California, United States. Association for Computational Linguistics. DOI: [10.18653/v1/2026.findings-acl.149](https://doi.org/10.18653/v1/2026.findings-acl.149). Code: [yisuanwang/PairCoder](https://github.com/yisuanwang/PairCoder).
+
 ## Install and update
 
 ### Install
 
+Install the official package from npm:
+
 ```bash
-pi install https://github.com/hazrid93/pi-advisor
+pi install npm:@hazrid1993/pi-advisor
 ```
 
 Then restart pi or run:
@@ -43,7 +68,7 @@ Then restart pi or run:
 /reload
 ```
 
-Other accepted package forms:
+To install directly from the source repository instead:
 
 ```bash
 pi install git:github.com/hazrid93/pi-advisor
@@ -327,7 +352,7 @@ The queue is single-flight, so advisor reviews never overlap. Epoch guards disca
 
 ## Development
 
-Validated against `@earendil-works/pi-*` **0.80.7**.
+Validated against `@earendil-works/pi-*` **0.83.0**.
 
 ```bash
 npm install
@@ -340,7 +365,7 @@ The test suite uses fake completions and requires no API key.
 ## Uninstall
 
 ```bash
-pi uninstall git:github.com/hazrid93/pi-advisor
+pi uninstall npm:@hazrid1993/pi-advisor
 ```
 
 Optionally remove global configuration:
