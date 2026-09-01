@@ -28,6 +28,29 @@ The advisor:
 
 Advice is framed as guidance for the main agent to weigh—not blindly obey.
 
+## Research: why a paired LLM improves coding results
+
+The two-model design is backed by peer-reviewed research. [**PairCoder: Pair Programming-Inspired Two-Agent Collaboration for Code Generation**](https://aclanthology.org/2026.findings-acl.149.pdf) (Chen et al., [Findings of ACL 2026](https://aclanthology.org/2026.findings-acl.149/)) shows that pairing two LLMs — one generating code, the other reviewing it — measurably beats single-model inference on coding tasks.
+
+Reported results:
+
+| Result | Detail |
+|---|---|
+| Higher accuracy | Up to **20.3%** improvement in pass@1 over single-model inference; **91.0%** pass@1 on HumanEval across eight representative backbones |
+| Consistent gains | Improvements hold across **13 LLMs**, so the effect is not specific to one model family |
+| Cheaper than heavy multi-agent setups | **40–70% fewer tokens** than multi-agent baselines while still outperforming them |
+| Heterogeneous pairs shine | Many pairings of *different* models outperform **both** constituent models |
+
+What this means for `pi-advisor`:
+
+- **Generator + reviewer beats a lone generator.** PairCoder's two-agent split — one model writes, one reviews — is exactly the shape `pi-advisor` gives pi: the main agent codes, the advisor model reviews every turn and catches what tunnel vision misses.
+- **The reviewer can (and often should) be a different model.** PairCoder found heterogeneous pairings frequently beat both constituent models — one reason `/advisor` lets you pick any model rather than a copy of the main agent.
+- **Lightweight beats heavyweight.** PairCoder achieves its gains with 40–70% fewer tokens than multi-agent frameworks. `pi-advisor` follows the same deployment-conscious philosophy: a bounded rolling transcript (default 24,000 characters), read-only exploration, and silence when the main agent is already on track.
+
+One honest difference: PairCoder alternates the two models between coder and reviewer roles when repeated errors signal a stalled interaction. `pi-advisor` keeps the roles fixed — the main agent always drives, the advisor always reviews — because in an interactive session the human decides when to change course.
+
+> Chen, Junhao, Xiang Li, Yibin Xu, Yuehan Cui, Fangsheng Weng, Hao Zhao, Fei Ma, and Qi Tian. 2026. *PairCoder: Pair Programming-Inspired Two-Agent Collaboration for Code Generation.* In *Findings of the Association for Computational Linguistics: ACL 2026*, pages 3043–3058, San Diego, California, United States. Association for Computational Linguistics. DOI: [10.18653/v1/2026.findings-acl.149](https://doi.org/10.18653/v1/2026.findings-acl.149). Code: [yisuanwang/PairCoder](https://github.com/yisuanwang/PairCoder).
+
 ## Install and update
 
 ### Install
