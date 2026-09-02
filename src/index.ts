@@ -305,6 +305,19 @@ export function formatCooldownMs(ms: number): string {
 	return `${ms}ms`;
 }
 
+/** Parse a mid_pause debounce value for `/advisor pause`: milliseconds
+ *  ("4000", "500ms") or seconds ("4s"). Returns ms in
+ *  [MIN_MID_PAUSE_MS, MAX_MID_PAUSE_MS], or null if invalid. No "off" —
+ *  the trigger itself is toggled via `/advisor triggers mid_pause`. */
+export function parseAdvisorMidPauseMs(value: string): number | null {
+	const normalized = value.trim().toLowerCase();
+	const match = normalized.match(/^(\d+(?:\.\d+)?)\s*(ms|s)?$/);
+	if (!match) return null;
+	const ms = Math.floor(Number(match[1]) * (match[2] === "s" ? 1_000 : 1));
+	if (!Number.isSafeInteger(ms) || ms < MIN_MID_PAUSE_MS || ms > MAX_MID_PAUSE_MS) return null;
+	return ms;
+}
+
 /** Parse/validate the `triggers` array from raw config. Unknown entries are
  *  dropped; de-duplicated preserving order; falls back to defaults if empty. */
 function normalizeTriggers(raw: unknown): AdvisorTrigger[] {

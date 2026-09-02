@@ -10,6 +10,7 @@ import {
 	normalizeConfig,
 	parseAdvisorContextSize,
 	parseAdvisorCooldownMs,
+	parseAdvisorMidPauseMs,
 	parseModelRef,
 	formatModelRef,
 	DEFAULT_CONFIG,
@@ -315,5 +316,22 @@ describe("parseAdvisorCooldownMs", () => {
 		// Explicit old values still round-trip (user choice is preserved).
 		expect(normalizeConfig({ cooldownMs: 0, maxToolRounds: 6 }).cooldownMs).toBe(0);
 		expect(normalizeConfig({ cooldownMs: 0, maxToolRounds: 6 }).maxToolRounds).toBe(6);
+	});
+});
+
+describe("parseAdvisorMidPauseMs", () => {
+	it("parses milliseconds and seconds", () => {
+		expect(parseAdvisorMidPauseMs("4000")).toBe(4000);
+		expect(parseAdvisorMidPauseMs("4s")).toBe(4000);
+		expect(parseAdvisorMidPauseMs("500ms")).toBe(500);
+		expect(parseAdvisorMidPauseMs("2.5s")).toBe(2500);
+	});
+
+	it("rejects values outside the debounce range (500ms-60s)", () => {
+		expect(parseAdvisorMidPauseMs("100")).toBeNull();  // too twitchy
+		expect(parseAdvisorMidPauseMs("90s")).toBeNull();  // too late to be an early warning
+		expect(parseAdvisorMidPauseMs("0")).toBeNull();    // no "off" — the trigger toggles instead
+		expect(parseAdvisorMidPauseMs("soon")).toBeNull();
+		expect(parseAdvisorMidPauseMs("")).toBeNull();
 	});
 });

@@ -199,10 +199,11 @@ input per review is just the new session update — prior turns, the advisor's
 own notes, and its read/grep/find results are read from cache at the
 provider's discounted rate.
 
-`/advisor status` shows the last review's token usage with its cache split
-(`cache N read / M write`) plus session-wide totals with the aggregate hit
-rate, so you can watch the prefix being reused. High cache-read on an
-Anthropic/OpenAI advisor model means the prefix is hitting.
+`/advisor status` shows per-review and session-wide token usage with the
+cache split — raw totals plus the cached/written breakdown and the aggregate
+hit rate, matching your provider's accounting (pi-ai reports `input` as
+uncached-only, with cache reads/writes in separate buckets). High cache-read
+on an Anthropic/OpenAI advisor model means the prefix is hitting.
 
 Two tuning levers:
 
@@ -320,6 +321,8 @@ mid-run inactivity; a fluid run that never pauses fires nothing from it.
 | `/advisor context [chars\|Nk\|default]` | Inspect or set the advisor conversation budget |
 | `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `2`; each round is an extra LLM call — lower = cheaper) |
 | `/advisor cooldown [30000\|30s\|1m\|off]` | Minimum gap between reviews; turns inside the gap coalesce into one review (default `30s`; `off` reviews every turn) |
+| `/advisor pause [4000\|4s]` | mid_pause quiet period before the once-per-run early-warning review (500ms–60s, default `4s`) |
+| `/advisor cache [short\|long\|none]` | Prompt-cache retention: `short` = 5m TTL (default), `long` = 1h for sparse cadences, `none` = disable markers + session affinity |
 | `/advisor triggers [name]` | Toggle review triggers (default: `turn_end`, `tool_error`) |
 | `/advisor instructions [show\|set <text>\|edit\|clear]` | Manage project-scoped advisor guidance |
 | `/advisor instructions global [show\|set <text>\|edit\|clear]` | Manage global (cross-repo) advisor guidance |
@@ -377,7 +380,8 @@ Example:
 | `maxRetries` | `3` | Consecutive failures before the backlog is dropped |
 | `interrupting` | `true` | Whether every advisory immediately triggers a turn |
 | `syncLag` | `0` | Backlog threshold before the main agent waits; `0` never waits |
-| `cacheRetention` | `"short"` | Prompt-cache TTL preference forwarded to pi-ai: `"short"` (Anthropic 5m, default), `"long"` (1h where supported — for sparse review cadences), `"none"` (disable cache markers + session affinity). Unset also honors pi-ai's `PI_CACHE_RETENTION` env |
+| `midPauseMs` | `4000` | Quiet period (agent inactivity) before the once-per-run `mid_pause` early-warning review fires (500–60000; also `/advisor pause`) |
+| `cacheRetention` | `"short"` | Prompt-cache TTL preference forwarded to pi-ai: `"short"` (Anthropic 5m, default), `"long"` (1h where supported — for sparse review cadences), `"none"` (disable cache markers + session affinity). Unset also honors pi-ai's `PI_CACHE_RETENTION` env. Also `/advisor cache` |
 | `systemPrompt` | built in | Optional full advisor system-prompt override |
 
 The global config path follows pi's `getAgentDir()` and therefore respects `PI_CODING_AGENT_DIR`.

@@ -35,13 +35,17 @@ import {
 	ADVISOR_TRIGGER_LABELS,
 	DEFAULT_COOLDOWN_MS,
 	DEFAULT_MAX_TOOL_ROUNDS,
+	DEFAULT_MID_PAUSE_MS,
 	formatCooldownMs,
 	formatModelRef,
 	MAX_CONTEXT_CHARS,
 	MAX_COOLDOWN_MS,
+	MAX_MID_PAUSE_MS,
 	MIN_CONTEXT_CHARS,
+	MIN_MID_PAUSE_MS,
 	parseAdvisorContextSize,
 	parseAdvisorCooldownMs,
+	parseAdvisorMidPauseMs,
 	parseModelRef,
 	RECOMMENDED_CONTEXT_CHARS,
 	readConfig,
@@ -258,6 +262,8 @@ const ADVISOR_SUBCOMMANDS: { value: string; description: string }[] = [
 	{ value: "context", description: "Inspect or set the rolling transcript budget" },
 	{ value: "rounds", description: "Max advisor tool rounds per review (0-12) — lower = cheaper" },
 	{ value: "cooldown", description: "Minimum gap between reviews (30000|30s|1m|off)" },
+	{ value: "pause", description: "mid_pause quiet period before early-warning review (4s|500ms)" },
+	{ value: "cache", description: "Prompt-cache retention: short (5m) | long (1h) | none" },
 	{ value: "thinking", description: "Set the advisor thinking effort (off|minimal|low|medium|high|xhigh)" },
 	{ value: "triggers", description: "Toggle review triggers (default: turn_end, tool_error)" },
 	{ value: "instructions", description: "Manage project + global advisor guidance and active mode" },
@@ -394,6 +400,11 @@ async function handleAdvisorCommand(
 				"  /advisor cooldown [30000|30s|1m|off]",
 				"                          Minimum gap between reviews; turns inside the gap",
 				"                          coalesce into one review, not dropped (default: 30s)",
+				"  /advisor pause [4000|4s]   mid_pause quiet period before the once-per-run",
+				"                          early-warning review fires (500ms-60s, default: 4s)",
+				"  /advisor cache [short|long|none]",
+				"                          Prompt-cache TTL: short=5m (default), long=1h for",
+				"                          sparse review cadences, none=disable cache + affinity",
 				"  /advisor thinking <off|minimal|low|medium|high|xhigh>",
 				"                          Set the advisor's thinking effort (off = disabled)",
 				"  /advisor triggers [name] Toggle review triggers (default: turn_end, tool_error)",
@@ -461,6 +472,16 @@ async function handleAdvisorCommand(
 
 	if (sub === "cooldown" || sub === "throttle") {
 		handleCooldown(ctx, rest);
+		return;
+	}
+
+	if (sub === "pause" || sub === "midpause") {
+		handleMidPause(ctx, rest);
+		return;
+	}
+
+	if (sub === "cache" || sub === "cacheretention") {
+		handleCacheRetention(ctx, rest);
 		return;
 	}
 
@@ -916,7 +937,72 @@ function handleCooldown(ctx: ExtensionCommandContext, rest: string): void {
 		(c) => ({ ...c, cooldownMs: ms }),
 		ms === 0
 			? `Advisor cooldown off — reviews every completed turn.`
-			: `Advisor cooldown ${ms.toLocaleString()}ms — turns inside the gap coalesce into one review.`,
+			: `Advisor cooldown ${formatCooldownMs(ms)} — turns inside the gap coalesce into one review.`,
+	);
+}
+
+/** Set the quiet period that must elapse (with no agent activity) before the
+ *  once-per-run mid_pause early-warning review fires. Shorter = catches pauses
+ *  sooner but risks firing during normal thinking gaps; longer = only fires on
+ *  genuinely long stalls. Only relevant when the mid_pause trigger is ticked;
+ *  this is the debounce DETECTION window, independent of the review cooldown
+ *  (a pause detected during a cooldown gap joins the coalesced queue). */
+function handleMidPause(ctx: ExtensionCommandContext, rest: string): void {
+	const arg = rest.trim().toLowerCase();
+	if (!arg) {
+		ctx.ui.notify(
+			`Advisor mid_pause debounce: ${formatCooldownMs(config.midPauseMs)} of agent inactivity before the once-per-run review fires ` +
+				`(default ${formatCooldownMs(DEFAULT_MID_PAUSE_MS)}).\n` +
+				`Requires the mid_pause trigger (currently ${config.triggers.includes("mid_pause") ? "ticked" : "NOT ticked — /advisor triggers mid_pause"}).\n` +
+				`Usage: /advisor pause <4000|4s>  (range ${MIN_MID_PAUSE_MS}ms-${formatCooldownMs(MAX_MID_PAUSE_MS)})`,
+			"info",
+		);
+		return;
+	}
+	const ms = parseAdvisorMidPauseMs(arg);
+	if (ms === null) {
+		ctx.ui.notify(
+			`Invalid pause: "${arg}". Try 4000 or 4s (range ${MIN_MID_PAUSE_MS}ms-${formatCooldownMs(MAX_MID_PAUSE_MS)}).`,
+			"error",
+		);
+		return;
+	}
+	updateConfig(
+		ctx,
+		(c) => ({ ...c, midPauseMs: ms }),
+		`Advisor mid_pause fires after ${formatCooldownMs(ms)} of agent inactivity (once per run).`,
+	);
+}
+
+/** Set the prompt-cache retention preference forwarded to pi-ai. "short" is
+ *  the 5-minute default (fine for every-turn cadences — each hit refreshes the
+ *  TTL); "long" requests 1h where the model supports it (worth it for sparse
+ *  cadences like agent_settled-only that can exceed 5m between reviews);
+ *  "none" disables cache markers AND session-affinity routing. */
+function handleCacheRetention(ctx: ExtensionCommandContext, rest: string): void {
+	const arg = rest.trim().toLowerCase();
+	if (!arg) {
+		ctx.ui.notify(
+			`Advisor cache retention: ${config.cacheRetention ?? "short (pi-ai default; PI_CACHE_RETENTION env also honored)"}.\n` +
+				`short = 5m TTL (refreshed on every hit) · long = 1h TTL where supported ·\n` +
+				`none = no cache markers, no session-affinity routing.\n` +
+				`Usage: /advisor cache <short|long|none>`,
+			"info",
+		);
+		return;
+	}
+	if (arg !== "short" && arg !== "long" && arg !== "none") {
+		ctx.ui.notify(`Invalid retention: "${arg}". Use short, long, or none.`, "error");
+		return;
+	}
+	updateConfig(
+		ctx,
+		(c) => ({ ...c, cacheRetention: arg }),
+		arg === "long"
+			? `Advisor cache retention: long — 1h TTL where the model supports it (good for sparse review cadences).`
+			: arg === "none"
+				? `Advisor cache retention: none — cache markers and session-affinity routing disabled.`
+				: `Advisor cache retention: short — provider default (5m TTL on Anthropic, refreshed per hit).`,
 	);
 }
 
