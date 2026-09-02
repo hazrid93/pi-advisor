@@ -36,16 +36,19 @@ import {
 	DEFAULT_COOLDOWN_MS,
 	DEFAULT_MAX_TOOL_ROUNDS,
 	DEFAULT_MID_PAUSE_MS,
+	DEFAULT_TURN_INTERVAL,
 	formatCooldownMs,
 	formatModelRef,
 	MAX_CONTEXT_CHARS,
 	MAX_COOLDOWN_MS,
 	MAX_MID_PAUSE_MS,
+	MAX_TURN_INTERVAL,
 	MIN_CONTEXT_CHARS,
 	MIN_MID_PAUSE_MS,
 	parseAdvisorContextSize,
 	parseAdvisorCooldownMs,
 	parseAdvisorMidPauseMs,
+	parseAdvisorTurnInterval,
 	parseModelRef,
 	RECOMMENDED_CONTEXT_CHARS,
 	readConfig,
@@ -262,6 +265,7 @@ const ADVISOR_SUBCOMMANDS: { value: string; description: string }[] = [
 	{ value: "context", description: "Inspect or set the rolling transcript budget" },
 	{ value: "rounds", description: "Max advisor tool rounds per review (0-12) — lower = cheaper" },
 	{ value: "cooldown", description: "Minimum gap between reviews (30000|30s|1m|off)" },
+	{ value: "turns", description: "Review every N turns (1-50) — cadence by work, not clock" },
 	{ value: "pause", description: "mid_pause quiet period before early-warning review (4s|500ms)" },
 	{ value: "cache", description: "Prompt-cache retention: short (5m) | long (1h) | none" },
 	{ value: "thinking", description: "Set the advisor thinking effort (off|minimal|low|medium|high|xhigh)" },
@@ -400,6 +404,9 @@ async function handleAdvisorCommand(
 				"  /advisor cooldown [30000|30s|1m|off]",
 				"                          Minimum gap between reviews; turns inside the gap",
 				"                          coalesce into one review, not dropped (default: 30s)",
+				"  /advisor turns [1-50]    Review every N turns instead of every turn;",
+				"                          skipped turns coalesce, and a finished run always",
+				"                          flushes its final review (default: 1 = every turn)",
 				"  /advisor pause [4000|4s]   mid_pause quiet period before the once-per-run",
 				"                          early-warning review fires (500ms-60s, default: 4s)",
 				"  /advisor cache [short|long|none]",
@@ -472,6 +479,11 @@ async function handleAdvisorCommand(
 
 	if (sub === "cooldown" || sub === "throttle") {
 		handleCooldown(ctx, rest);
+		return;
+	}
+
+	if (sub === "turns" || sub === "turn-interval" || sub === "every") {
+		handleTurnInterval(ctx, rest);
 		return;
 	}
 
@@ -941,6 +953,37 @@ function handleCooldown(ctx: ExtensionCommandContext, rest: string): void {
 	);
 }
 
+/** Set the turn-based review cadence: with N > 1, only every Nth turn_end
+ *  requests a review (skipped turns coalesce — deltas merge, nothing is
+ *  dropped — and a finished run always flushes its final review). Unlike a
+ *  pure time cooldown this self-adjusts to pacing: slow thoughtful runs and
+ *  rapid tool bursts both get reviewed at the same *work* rate. */
+function handleTurnInterval(ctx: ExtensionCommandContext, rest: string): void {
+	const arg = rest.trim().toLowerCase();
+	if (!arg) {
+		ctx.ui.notify(
+			`Advisor reviews every ${config.turnInterval} turn(s) (default ${DEFAULT_TURN_INTERVAL} = every turn).\n` +
+				`Turns between reviews coalesce into the next one; a finished run always\n` +
+				`flushes its final review even if the interval hasn't elapsed.\n` +
+				`Usage: /advisor turns <1-${MAX_TURN_INTERVAL}|every>`,
+			"info",
+		);
+		return;
+	}
+	const n = parseAdvisorTurnInterval(arg);
+	if (n === null) {
+		ctx.ui.notify(`Invalid turn interval: "${arg}". Use an integer 1-${MAX_TURN_INTERVAL} (or "every").`, "error");
+		return;
+	}
+	updateConfig(
+		ctx,
+		(c) => ({ ...c, turnInterval: n }),
+		n === 1
+			? `Advisor reviews every completed turn.`
+			: `Advisor reviews every ${n} turns — skipped turns coalesce; finished runs still flush their final review.`,
+	);
+}
+
 /** Set the quiet period that must elapse (with no agent activity) before the
  *  once-per-run mid_pause early-warning review fires. Shorter = catches pauses
  *  sooner but risks firing during normal thinking gaps; longer = only fires on
@@ -1095,7 +1138,8 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	lines.push(
 		`Limits: max ${config.maxToolRounds} tool round(s)/review` +
 			` · cooldown ${config.cooldownMs === 0 ? "off" : formatCooldownMs(config.cooldownMs)}` +
-			`  (/advisor rounds, /advisor cooldown)`,
+			` · every ${config.turnInterval} turn(s)` +
+			`  (/advisor rounds, /advisor cooldown, /advisor turns)`,
 	);
 
 	const active = config.enabled && !!config.advisorModel;

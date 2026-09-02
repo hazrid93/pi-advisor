@@ -173,6 +173,11 @@ export class AdvisorRuntime {
 
 	/** Last time a review was *started*, for the cooldown throttle (D3). */
 	#lastReviewAt = 0;
+	/** Completed-turn counter for the `turnInterval` cadence gate: a turn_end
+	 *  review is requested only every N turns (default 1 = every turn).
+	 *  Skipped turns keep their deltas staged (coalesced into the next review,
+	 *  exactly like cooldown-skipped ones). Reset with the conversation. */
+	#turnsSinceReview = 0;
 
 	/** Latest-wins generation counter. Captured synchronously at the start of
 	 *  every {@link requestReview} call (before any `await`) and re-checked after
@@ -330,6 +335,15 @@ export class AdvisorRuntime {
 		this.#pendingToolError = false;
 		const shouldReview = this.#has("turn_end") || (pendingError && this.#has("tool_error"));
 		if (!shouldReview) return Promise.resolve();
+		// Turn-interval gate (work-cadence throttle): with turnInterval N > 1,
+		// only every Nth turn_end requests a review. Skipped turns keep their
+		// deltas staged — they coalesce into the next review, and the settle
+		// flush guarantees a finished run still gets its final review.
+		// tool_error bypasses the gate: failures are worth reviewing promptly.
+		this.#turnsSinceReview++;
+		if (this.config.turnInterval > 1 && !pendingError && this.#turnsSinceReview < this.config.turnInterval) {
+			return Promise.resolve();
+		}
 		return this.requestReview({ source: pendingError && !this.#has("turn_end") ? "tool_error" : "turn_end", ctx });
 	}
 
@@ -364,6 +378,15 @@ export class AdvisorRuntime {
 	onAgentSettled(ctx: ReviewCtx): Promise<void> {
 		if (this.disposed || !this.config.enabled || !this.config.advisorModel) return Promise.resolve();
 		this.#cancelMidPause();
+		// Settle flush: a finished run always deserves its final review, even if
+		// turn_interval/cooldown skipped or deferred its last few turns — the
+		// staged deltas ride along, so nothing from the run goes unreviewed.
+		// Only fires when there's something new (staged deltas) and nothing
+		// already queued/in-flight. Non-triggering: advice lands as a note.
+		const throttled = this.config.turnInterval > 1 || this.config.cooldownMs > 0;
+		if (throttled && this.#contextChars > 0 && !this.#busy && this.#pending.length === 0) {
+			return this.requestReview({ source: "agent_settled", ctx, forceNonTriggering: true });
+		}
 		if (!this.#has("agent_settled")) return Promise.resolve();
 		return this.requestReview({ source: "agent_settled", ctx, forceNonTriggering: true });
 	}
@@ -521,6 +544,7 @@ export class AdvisorRuntime {
 		// Commit: become the newest generation. Any still-in-flight review with an
 		// older gen will have its delivery suppressed.
 		const myGen = ++this.#generation;
+		this.#turnsSinceReview = 0;
 		// Move the staged deltas into this pending turn (they are now frozen for
 		// this review; new captures accumulate in the buffer for the NEXT one). A
 		// superseded pending turn's deltas are MERGED in so latest-wins never
@@ -594,6 +618,7 @@ export class AdvisorRuntime {
 		this.#bumpEpoch();
 		this.#pending = [];
 		this.#consecutiveFailures = 0;
+		this.#turnsSinceReview = 0;
 		this.#contextBuffer = [];
 		this.#contextChars = 0;
 		this.#advisorHistory = [];

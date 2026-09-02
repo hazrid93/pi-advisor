@@ -193,6 +193,13 @@ export interface AdvisorConfig {
 	 *  interrupt; `nit` lands as a non-interrupting note visible on the next
 	 *  turn. Toggled with `/advisor interrupting`. */
 	interrupting: boolean;
+	/** Turn-based review cadence: a review is requested every `turnInterval`
+	 *  completed turns (default 1 = every turn). Cadence measured in units of
+	 *  WORK, not wall-clock — it self-adjusts to slow vs rapid pacing where a
+	 *  pure cooldown cannot. Skipped turns stay staged and coalesce into the
+	 *  next review (nothing dropped); the `agent_settled` flush always fires
+	 *  for a finished run regardless of the counter. See `/advisor turns`. */
+	turnInterval: number;
 	/** How far the advisor may fall behind (in turns) before the main agent
 	 *  WAITS for it to catch up at the `turn_end` boundary. 0 = never wait (the
 	 *  advisor reviews fully in the background; today's default). 1 = the agent
@@ -253,6 +260,26 @@ export function parseAdvisorContextSize(value: string): number | null {
  *  cooldown off` restores review-every-turn behavior. */
 export const DEFAULT_COOLDOWN_MS = 30_000;
 
+/** Default turn-based review cadence: every completed turn requests a review
+ *  (subject to cooldown coalescing). Set higher (`/advisor turns 6`) to
+ *  review every N turns instead — cadence measured in units of WORK rather
+ *  than wall-clock, so it self-adjusts to slow vs rapid turn pacing. Turns
+ *  skipped by the interval stay staged and coalesce into the next review,
+ *  exactly like cooldown-skipped ones. */
+export const DEFAULT_TURN_INTERVAL = 1;
+export const MAX_TURN_INTERVAL = 50;
+
+/** Parse a turn-interval value for `/advisor turns`: a positive integer
+ *  ("6"), or "1"/"every"/"default" for every turn. Returns null if invalid. */
+export function parseAdvisorTurnInterval(value: string): number | null {
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "every" || normalized === "default") return 1;
+	if (!/^\d+$/.test(normalized)) return null;
+	const n = Number(normalized);
+	if (!Number.isSafeInteger(n) || n < 1 || n > MAX_TURN_INTERVAL) return null;
+	return n;
+}
+
 /** Default max read-only tool rounds per review. Each round is an extra
  *  advisor LLM call re-sending the growing conversation, so this is the
  *  biggest per-review cost multiplier. 2 covers the common explore pattern
@@ -268,6 +295,7 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	thinkingLevel: "medium",
 	contextChars: RECOMMENDED_CONTEXT_CHARS,
 	cooldownMs: DEFAULT_COOLDOWN_MS,
+	turnInterval: DEFAULT_TURN_INTERVAL,
 	maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
 	maxRetries: 3,
 	interrupting: true,
@@ -387,6 +415,14 @@ export function normalizeConfig(raw: unknown): AdvisorConfig {
 		obj.cooldownMs <= MAX_COOLDOWN_MS
 	) {
 		base.cooldownMs = Math.floor(obj.cooldownMs);
+	}
+	if (
+		typeof obj.turnInterval === "number" &&
+		Number.isFinite(obj.turnInterval) &&
+		obj.turnInterval >= 1 &&
+		obj.turnInterval <= MAX_TURN_INTERVAL
+	) {
+		base.turnInterval = Math.floor(obj.turnInterval);
 	}
 	if (
 		typeof obj.maxToolRounds === "number" &&

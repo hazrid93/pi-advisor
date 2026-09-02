@@ -11,6 +11,7 @@ import {
 	parseAdvisorContextSize,
 	parseAdvisorCooldownMs,
 	parseAdvisorMidPauseMs,
+	parseAdvisorTurnInterval,
 	parseModelRef,
 	formatModelRef,
 	DEFAULT_CONFIG,
@@ -333,5 +334,31 @@ describe("parseAdvisorMidPauseMs", () => {
 		expect(parseAdvisorMidPauseMs("0")).toBeNull();    // no "off" — the trigger toggles instead
 		expect(parseAdvisorMidPauseMs("soon")).toBeNull();
 		expect(parseAdvisorMidPauseMs("")).toBeNull();
+	});
+});
+
+describe("parseAdvisorTurnInterval", () => {
+	it("parses positive integers and the 'every' synonym", () => {
+		expect(parseAdvisorTurnInterval("1")).toBe(1);
+		expect(parseAdvisorTurnInterval("6")).toBe(6);
+		expect(parseAdvisorTurnInterval("every")).toBe(1);
+		expect(parseAdvisorTurnInterval("default")).toBe(1);
+		expect(parseAdvisorTurnInterval("50")).toBe(50);
+	});
+
+	it("rejects invalid or out-of-range values", () => {
+		expect(parseAdvisorTurnInterval("0")).toBeNull();   // would mean 'never'
+		expect(parseAdvisorTurnInterval("-3")).toBeNull();
+		expect(parseAdvisorTurnInterval("2.5")).toBeNull(); // turns are discrete
+		expect(parseAdvisorTurnInterval("51")).toBeNull();  // beyond MAX_TURN_INTERVAL
+		expect(parseAdvisorTurnInterval("often")).toBeNull();
+		expect(parseAdvisorTurnInterval("")).toBeNull();
+	});
+
+	it("defaults to 1 (review every turn) and round-trips explicit values", () => {
+		expect(DEFAULT_CONFIG.turnInterval).toBe(1);
+		expect(normalizeConfig({}).turnInterval).toBe(1);
+		expect(normalizeConfig({ turnInterval: 6 }).turnInterval).toBe(6);
+		expect(normalizeConfig({ turnInterval: 0 }).turnInterval).toBe(1); // invalid → default
 	});
 });

@@ -99,7 +99,7 @@ const FAKE_MODEL: Model<Api> = {
 function makeRuntime(
 	review: ReviewFn,
 	branch: SessionEntry[] = [],
-	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; cooldownMs: number; syncLag: number; triggers: AdvisorTrigger[]; midPauseMs: number; cacheRetention: "none" | "short" | "long" }> = {},
+	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; cooldownMs: number; turnInterval: number; syncLag: number; triggers: AdvisorTrigger[]; midPauseMs: number; cacheRetention: "none" | "short" | "long" }> = {},
 ) {
 	const sendAdvice = vi.fn(async (_notes: AdvisorNote[], _model: string, _opts?: { forceNonTriggering?: boolean }) => {});
 	const host = { sendAdvice };
@@ -112,6 +112,7 @@ function makeRuntime(
 			thinkingLevel: "medium" as const,
 			contextChars: config.contextChars ?? 12_000,
 			cooldownMs: config.cooldownMs ?? 0,
+			turnInterval: config.turnInterval ?? 1,
 			maxToolRounds: 6,
 			maxRetries: config.maxRetries ?? 3,
 			interrupting: true,
@@ -435,6 +436,103 @@ describe("AdvisorRuntime — history prefix (prompt-cache invariants)", () => {
 		expect(calls).toHaveLength(2);
 		expect(calls[1]).toContain("turn-1");
 		expect(calls[1]).toContain("turn-2");
+	});
+
+	it("turnInterval reviews every Nth turn and coalesces the skipped ones", async () => {
+		const seen: string[] = [];
+		const { rt, ctx } = makeRuntime(
+			async (text) => { seen.push(text); return { advise: null, rounds: 0 }; },
+			[],
+			{ turnInterval: 3 },
+		);
+		for (let i = 1; i <= 5; i++) {
+			const t = turn(`turn-${i}`);
+			await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [entry("user", `u${i}`)], ctx);
+			await settle(rt);
+		}
+		// Turns 1-2 skipped (staged), turn 3 reviews turns 1-3, turns 4-5 skipped.
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toContain("turn-1");
+		expect(seen[0]).toContain("turn-2");
+		expect(seen[0]).toContain("turn-3");
+		expect(seen[0]).not.toContain("turn-5"); // staged for the NEXT review
+	});
+
+	it("settle flush: a run finished early still gets its final review", async () => {
+		// turnInterval 6 but the run ends after 2 turns — the settle flush must
+		// review the staged deltas instead of leaving them for the next run.
+		const seen: string[] = [];
+		const { rt, ctx } = makeRuntime(
+			async (text) => { seen.push(text); return { advise: null, rounds: 0 }; },
+			[],
+			{ turnInterval: 6 },
+		);
+		for (let i = 1; i <= 2; i++) {
+			const t = turn(`only-${i}`);
+			await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+			await settle(rt);
+		}
+		expect(seen).toHaveLength(0); // interval skipped both
+		await rt.onAgentSettled(ctx);
+		await settle(rt);
+		expect(seen).toHaveLength(1); // flushed at settle
+		expect(seen[0]).toContain("only-1");
+		expect(seen[0]).toContain("only-2");
+	});
+
+	it("settle flush skips a duplicate when the run's last turn was just reviewed", async () => {
+		const review = vi.fn(async () => ({ advise: null, rounds: 0 }));
+		const { rt, ctx } = makeRuntime(review as never, [], { turnInterval: 2 });
+		for (let i = 1; i <= 2; i++) {
+			const t = turn(`t${i}`);
+			await rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+			await settle(rt);
+		}
+		expect(review).toHaveBeenCalledTimes(1); // turn 2 hit the interval
+		await rt.onAgentSettled(ctx);
+		await settle(rt);
+		expect(review).toHaveBeenCalledTimes(1); // nothing new staged → no flush
+	});
+
+	it("settle flush does not double-queue while a review is in flight", async () => {
+		const { review, calls, release } = hangingReview();
+		const { rt, ctx } = makeRuntime(review, [], { turnInterval: 2 });
+		// Two turns → turn 2 hits the interval and starts the in-flight review.
+		for (let i = 1; i <= 2; i++) {
+			const t = turn(`t${i}`);
+			void rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [], ctx);
+		}
+		await flush();
+		expect(rt.isBusy).toBe(true);
+		// A third turn lands while busy, then the run settles: staged deltas exist
+		// but a review is already in flight → the flush must NOT enqueue a dup.
+		const t3 = turn("t3");
+		void rt.onTurnEnd(t3.message as AgentMessage, t3.toolResults, [], ctx);
+		await rt.onAgentSettled(ctx);
+		release({ advise: null, rounds: 0 });
+		await settle(rt);
+		expect(calls).toHaveLength(1); // no duplicate
+	});
+
+	it("tool_error bypasses the turn-interval gate", async () => {
+		const seen: string[] = [];
+		const { rt, ctx } = makeRuntime(
+			async (text) => { seen.push(text); return { advise: null, rounds: 0 }; },
+			[],
+			{ turnInterval: 10 },
+		);
+		const t1 = turn("normal");
+		await rt.onTurnEnd(t1.message as AgentMessage, t1.toolResults, [], ctx);
+		await settle(rt);
+		expect(seen).toHaveLength(0); // interval skipped
+		// A tool error on the next turn reviews promptly despite the interval.
+		const t2 = turn("after error");
+		await rt.onToolExecutionEnd({ toolCallId: "c1", toolName: "bash", result: "boom", isError: true }, ctx);
+		await rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [], ctx);
+		await settle(rt);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toContain("normal");   // the skipped turn rode along
+		expect(seen[0]).toContain("after error");
 	});
 
 	it("cooldown-coalesced deltas ride the next eligible review", async () => {

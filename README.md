@@ -278,6 +278,18 @@ contained a tool error (`turn_end` + `tool_error`). You can enable additional
 review points or turn others off — capture of each finalized turn always runs
 on `turn_end` regardless, so switching triggers never loses context.
 
+Two throttles shape how often those triggers actually start a review (both
+apply to every trigger, and both coalesce rather than drop):
+
+- **Time** — `cooldownMs` (default 30s): at most one review per gap.
+- **Work** — `turnInterval` (default 1): review every N completed turns, which
+  self-adjusts to pacing (rapid bursts and slow thoughtful runs get the same
+  per-work coverage).
+
+Either way, a run that *finishes* early always flushes its final review at
+`agent_settled` with everything coalesced — throttling never leaves a finished
+run unreviewed.
+
 ```text
 /advisor triggers              # open the fuzzy-searchable toggle menu
 /advisor triggers agent_settled  # toggle one trigger by name
@@ -321,6 +333,7 @@ mid-run inactivity; a fluid run that never pauses fires nothing from it.
 | `/advisor context [chars\|Nk\|default]` | Inspect or set the advisor conversation budget |
 | `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `2`; each round is an extra LLM call — lower = cheaper) |
 | `/advisor cooldown [30000\|30s\|1m\|off]` | Minimum gap between reviews; turns inside the gap coalesce into one review (default `30s`; `off` reviews every turn) |
+| `/advisor turns [1-50\|every]` | Review every N turns instead of every turn (default `1`); skipped turns coalesce, and a finished run always flushes its final review |
 | `/advisor pause [4000\|4s]` | mid_pause quiet period before the once-per-run early-warning review (500ms–60s, default `4s`) |
 | `/advisor cache [short\|long\|none]` | Prompt-cache retention: `short` = 5m TTL (default), `long` = 1h for sparse cadences, `none` = disable markers + session affinity |
 | `/advisor triggers [name]` | Toggle review triggers (default: `turn_end`, `tool_error`) |
@@ -360,6 +373,7 @@ Example:
   "thinkingLevel": "medium",
   "contextChars": 24000,
   "cooldownMs": 30000,
+  "turnInterval": 1,
   "maxToolRounds": 2,
   "maxRetries": 3,
   "interrupting": true,
@@ -376,6 +390,7 @@ Example:
 | `thinkingLevel` | `"medium"` | Reasoning effort |
 | `contextChars` | `24000` | Advisor conversation budget (append-only, cache-friendly; oldest half dropped at once when exceeded) |
 | `cooldownMs` | `30000` | Minimum gap between reviews; turns inside the gap coalesce into one review (nothing dropped); `0` reviews every completed turn |
+| `turnInterval` | `1` | Review every N completed turns instead of every turn (work-cadence throttle — self-adjusts to slow vs rapid pacing); skipped turns coalesce; a finished run always flushes its final review; also `/advisor turns` |
 | `maxToolRounds` | `2` | Maximum read-only exploration rounds per review; each round is an extra LLM call — the main per-review cost lever; hard-capped at 12 |
 | `maxRetries` | `3` | Consecutive failures before the backlog is dropped |
 | `interrupting` | `true` | Whether every advisory immediately triggers a turn |
