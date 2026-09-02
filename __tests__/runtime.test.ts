@@ -526,10 +526,13 @@ describe("AdvisorRuntime — history prefix (prompt-cache invariants)", () => {
 	});
 
 	it("accumulates session-wide usage totals (aggregate cache-hit rate) across reviews", async () => {
+		// Fixtures use pi-ai's NORMALIZED usage shape: `input` is uncached-only
+		// (input = prompt_tokens − cacheRead − cacheWrite), so a warm review has
+		// tiny `input` and large `cacheRead` — like the user's real kimi-k3 log.
 		const usages = [
-			{ input: 1000, output: 30, cacheRead: 0, cacheWrite: 1000 },   // cold: full write
-			{ input: 1200, output: 40, cacheRead: 1000, cacheWrite: 200 },  // warm: prefix hit
-			{ input: 1400, output: 50, cacheRead: 1200, cacheWrite: 200 },  // warm again
+			{ input: 1000, output: 30, cacheRead: 0, cacheWrite: 1000 },    // cold: 1000 prompt, all written
+			{ input: 200, output: 40, cacheRead: 1000, cacheWrite: 200 },    // warm: 1200 prompt, 1000 cached
+			{ input: 200, output: 50, cacheRead: 1200, cacheWrite: 200 },    // warm: 1600 prompt, 1200 cached
 		] as AssistantMessage["usage"][];
 		let i = 0;
 		const review: ReviewFn = async (_t, _m, _a, _c, _s, cfg) => {
@@ -544,11 +547,17 @@ describe("AdvisorRuntime — history prefix (prompt-cache invariants)", () => {
 		}
 		expect(rt.usageTotals).toEqual({
 			reviews: 3,
-			input: 3600,
+			input: 1400,      // uncached-only sum
 			output: 120,
 			cacheRead: 2200,
 			cacheWrite: 1400,
 		});
+		// True aggregate hit rate: cacheRead / (input + cacheRead + cacheWrite)
+		// = 2200 / 5000 = 44% — NOT cacheRead/input (157%), the 0.6.5 bug.
+		const t2 = rt.usageTotals;
+		const totalInput = t2.input + t2.cacheRead + t2.cacheWrite;
+		expect(totalInput).toBe(5000);
+		expect(Math.round((t2.cacheRead / totalInput) * 100)).toBe(44);
 	});
 
 	it("passes the configured cacheRetention through to the review config", async () => {

@@ -1022,23 +1022,30 @@ function showStatus(ctx: ExtensionCommandContext): void {
 		// Token usage of the last completed review round, with the cache split —
 		// makes prompt-cache effectiveness visible at a glance (cache-read high =
 		// the append-only conversation prefix is hitting).
+		// Usage lines mirror the provider's raw accounting: pi-ai normalizes
+		// `usage.input` to UNCACHED tokens only (input = prompt − cacheRead −
+		// cacheWrite), so the true total prompt size and the hit rate must be
+		// computed against (input + cacheRead + cacheWrite) — never cacheRead/
+		// input, which both inflates the rate and makes the sums look wrong.
 		const usage = rt.lastUsage;
 		if (usage) {
 			const fmt = (n: number) => n.toLocaleString();
+			const total = usage.input + usage.cacheRead + usage.cacheWrite;
 			const cache = usage.cacheRead > 0 || usage.cacheWrite > 0
-				? ` · cache ${fmt(usage.cacheRead)} read / ${fmt(usage.cacheWrite)} write`
-					: " · cache 0 (provider did not report prompt caching)";
-			lines.push(`Last review usage: ${fmt(usage.input)} in${cache} · ${fmt(usage.output)} out tokens`);
+				? ` (${fmt(usage.cacheRead)} cached / ${fmt(usage.cacheWrite)} write)`
+					: " (provider did not report prompt caching)";
+			lines.push(`Last review: ${fmt(total)} total in${cache} · ${fmt(usage.output)} out`);
 		}
 		// Session-wide aggregate: the cache-hit rate across every review round is
 		// the number that actually reflects the append-only prefix design.
 		const totals = rt.usageTotals;
 		if (totals.reviews > 0) {
 			const fmt = (n: number) => n.toLocaleString();
-			const hitRate = totals.input > 0 ? Math.round((totals.cacheRead / totals.input) * 100) : 0;
+			const totalInput = totals.input + totals.cacheRead + totals.cacheWrite;
+			const hitRate = totalInput > 0 ? Math.round((totals.cacheRead / totalInput) * 100) : 0;
 			lines.push(
-				`Session totals: ${totals.reviews} review round(s) · ${fmt(totals.input)} in ` +
-				`(${fmt(totals.cacheRead)} from cache · ${hitRate}% hit) · ${fmt(totals.output)} out tokens`,
+				`Session totals: ${totals.reviews} review round(s) · ${fmt(totalInput)} total in ` +
+				`(${fmt(totals.cacheRead)} cached · ${hitRate}% hit · ${fmt(totals.cacheWrite)} write) · ${fmt(totals.output)} out`,
 			);
 		}
 	} else {
