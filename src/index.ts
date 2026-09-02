@@ -177,10 +177,6 @@ export interface AdvisorConfig {
 	 *  dropped at once. Also bounds the staging buffer of not-yet-reviewed
 	 *  per-turn deltas. */
 	contextChars: number;
-	/** Minimum gap (ms) between advisor reviews. 0 = review every turn_end (the
-	 *  default). Set higher to throttle cost on a busy agent: turns arriving
-	 *  inside the cooldown are coalesced into the next eligible review, not dropped. */
-	cooldownMs: number;
 	/** Max read-only tool rounds the advisor may take per review before it must
 	 *  call `advise` or yield. Guards against a runaway advisor loop. */
 	maxToolRounds: number;
@@ -252,20 +248,11 @@ export function parseAdvisorContextSize(value: string): number | null {
 	return chars;
 }
 
-/** Default minimum gap between advisor reviews. Turns arriving inside the gap
- *  coalesce into the next eligible review (deltas merge, nothing is dropped),
- *  so this throttles review FREQUENCY without losing coverage. 30s caps
- *  turn_end-heavy runs at ~2 reviews/minute — the default guard against the
- *  advisor out-calling the main model on tool-heavy bursts. `/advisor
- *  cooldown off` restores review-every-turn behavior. */
-export const DEFAULT_COOLDOWN_MS = 30_000;
-
-/** Default turn-based review cadence: every completed turn requests a review
- *  (subject to cooldown coalescing). Set higher (`/advisor turns 6`) to
- *  review every N turns instead — cadence measured in units of WORK rather
- *  than wall-clock, so it self-adjusts to slow vs rapid turn pacing. Turns
- *  skipped by the interval stay staged and coalesce into the next review,
- *  exactly like cooldown-skipped ones. */
+/** Default turn-based review cadence: every completed turn requests a review.
+ *  Set higher (`/advisor turns 6`) to review every N turns instead — cadence
+ *  measured in units of WORK rather than wall-clock, so it self-adjusts to
+ *  slow vs rapid turn pacing. Turns skipped by the interval stay staged and
+ *  coalesce into the next review. */
 export const DEFAULT_TURN_INTERVAL = 1;
 export const MAX_TURN_INTERVAL = 50;
 
@@ -294,7 +281,6 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	thinking: false,
 	thinkingLevel: "medium",
 	contextChars: RECOMMENDED_CONTEXT_CHARS,
-	cooldownMs: DEFAULT_COOLDOWN_MS,
 	turnInterval: DEFAULT_TURN_INTERVAL,
 	maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
 	maxRetries: 3,
@@ -307,27 +293,8 @@ export const DEFAULT_CONFIG: AdvisorConfig = {
 	// PI_CACHE_RETENTION env) applies unless the user opts in.
 };
 
-/** Upper bound for the review cooldown (10 minutes) — above this the advisor
- *  effectively stops reviewing during active work. */
-export const MAX_COOLDOWN_MS = 600_000;
-
-/** Parse a cooldown value for `/advisor cooldown`: milliseconds ("30000",
- *  "500ms"), seconds ("30s"), minutes ("1m", "1.5m"), or off ("0", "off",
- *  "none", "default"). Returns ms in [0, MAX_COOLDOWN_MS], or null if invalid. */
-export function parseAdvisorCooldownMs(value: string): number | null {
-	const normalized = value.trim().toLowerCase();
-	if (normalized === "off" || normalized === "none" || normalized === "default" || normalized === "0") return 0;
-	const match = normalized.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/);
-	if (!match) return null;
-	const unit = match[2];
-	const multiplier = unit === "m" ? 60_000 : unit === "s" ? 1_000 : 1;
-	const ms = Math.floor(Number(match[1]) * multiplier);
-	if (!Number.isSafeInteger(ms) || ms < 0 || ms > MAX_COOLDOWN_MS) return null;
-	return ms;
-}
-
-/** Format a cooldown for display (status lines): "30s", "1m", raw ms under 1s. */
-export function formatCooldownMs(ms: number): string {
+/** Format a duration for display (status lines): "30s", "1m", raw ms under 1s. */
+export function formatDurationMs(ms: number): string {
 	if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`;
 	if (ms >= 1_000 && ms % 1_000 === 0) return `${ms / 1_000}s`;
 	return `${ms}ms`;
@@ -407,14 +374,6 @@ export function normalizeConfig(raw: unknown): AdvisorConfig {
 			MAX_CONTEXT_CHARS,
 			Math.max(MIN_CONTEXT_CHARS, Math.floor(obj.contextChars)),
 		);
-	}
-	if (
-		typeof obj.cooldownMs === "number" &&
-		Number.isFinite(obj.cooldownMs) &&
-		obj.cooldownMs >= 0 &&
-		obj.cooldownMs <= MAX_COOLDOWN_MS
-	) {
-		base.cooldownMs = Math.floor(obj.cooldownMs);
 	}
 	if (
 		typeof obj.turnInterval === "number" &&

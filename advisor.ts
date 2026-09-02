@@ -33,20 +33,17 @@ import {
 	ADVISOR_COMMAND_DESCRIPTION,
 	ADVISOR_TRIGGERS,
 	ADVISOR_TRIGGER_LABELS,
-	DEFAULT_COOLDOWN_MS,
 	DEFAULT_MAX_TOOL_ROUNDS,
 	DEFAULT_MID_PAUSE_MS,
 	DEFAULT_TURN_INTERVAL,
-	formatCooldownMs,
+	formatDurationMs,
 	formatModelRef,
 	MAX_CONTEXT_CHARS,
-	MAX_COOLDOWN_MS,
 	MAX_MID_PAUSE_MS,
 	MAX_TURN_INTERVAL,
 	MIN_CONTEXT_CHARS,
 	MIN_MID_PAUSE_MS,
 	parseAdvisorContextSize,
-	parseAdvisorCooldownMs,
 	parseAdvisorMidPauseMs,
 	parseAdvisorTurnInterval,
 	parseModelRef,
@@ -264,7 +261,6 @@ const ADVISOR_SUBCOMMANDS: { value: string; description: string }[] = [
 	{ value: "sync", description: "Wait for the advisor when it falls N turns behind (0-6)" },
 	{ value: "context", description: "Inspect or set the rolling transcript budget" },
 	{ value: "rounds", description: "Max advisor tool rounds per review (0-12) — lower = cheaper" },
-	{ value: "cooldown", description: "Minimum gap between reviews (30000|30s|1m|off)" },
 	{ value: "turns", description: "Review every N turns (1-50) — cadence by work, not clock" },
 	{ value: "pause", description: "mid_pause quiet period before early-warning review (4s|500ms)" },
 	{ value: "cache", description: "Prompt-cache retention: short (5m) | long (1h) | none" },
@@ -401,9 +397,6 @@ async function handleAdvisorCommand(
 				"                          Set rolling transcript size (default: 24k chars)",
 				"  /advisor rounds [0-12]   Max advisor tool rounds per review (default: 2)",
 				"                          Each round is an extra LLM call — lower = cheaper",
-				"  /advisor cooldown [30000|30s|1m|off]",
-				"                          Minimum gap between reviews; turns inside the gap",
-				"                          coalesce into one review, not dropped (default: 30s)",
 				"  /advisor turns [1-50]    Review every N turns instead of every turn;",
 				"                          skipped turns coalesce, and a finished run always",
 				"                          flushes its final review (default: 1 = every turn)",
@@ -474,11 +467,6 @@ async function handleAdvisorCommand(
 
 	if (sub === "rounds" || sub === "round") {
 		handleRounds(ctx, rest);
-		return;
-	}
-
-	if (sub === "cooldown" || sub === "throttle") {
-		handleCooldown(ctx, rest);
 		return;
 	}
 
@@ -924,35 +912,6 @@ function handleRounds(ctx: ExtensionCommandContext, rest: string): void {
 	);
 }
 
-/** Set the minimum gap between advisor reviews. Turns arriving inside the gap
- *  are coalesced into the next eligible review (their deltas merge, nothing is
- *  dropped) — the throttle for turn_end-heavy setups where the advisor fires
- *  far more often than the main model. 0/off = review every turn (default). */
-function handleCooldown(ctx: ExtensionCommandContext, rest: string): void {
-	const arg = rest.trim().toLowerCase();
-	if (!arg) {
-		ctx.ui.notify(
-			`Advisor cooldown: ${config.cooldownMs === 0 ? "off (review every turn)" : `${formatCooldownMs(config.cooldownMs)}`} (default ${formatCooldownMs(DEFAULT_COOLDOWN_MS)}).\n` +
-				`Turns arriving inside the gap coalesce into one review — nothing is dropped.\n` +
-				`Usage: /advisor cooldown <30000|30s|1m|off>  (max ${(MAX_COOLDOWN_MS / 60000).toLocaleString()}m)`,
-			"info",
-		);
-		return;
-	}
-	const ms = parseAdvisorCooldownMs(arg);
-	if (ms === null) {
-		ctx.ui.notify(`Invalid cooldown: "${arg}". Try 30000, 30s, 1m, or off.`, "error");
-		return;
-	}
-	updateConfig(
-		ctx,
-		(c) => ({ ...c, cooldownMs: ms }),
-		ms === 0
-			? `Advisor cooldown off — reviews every completed turn.`
-			: `Advisor cooldown ${formatCooldownMs(ms)} — turns inside the gap coalesce into one review.`,
-	);
-}
-
 /** Set the turn-based review cadence: with N > 1, only every Nth turn_end
  *  requests a review (skipped turns coalesce — deltas merge, nothing is
  *  dropped — and a finished run always flushes its final review). Unlike a
@@ -988,16 +947,16 @@ function handleTurnInterval(ctx: ExtensionCommandContext, rest: string): void {
  *  once-per-run mid_pause early-warning review fires. Shorter = catches pauses
  *  sooner but risks firing during normal thinking gaps; longer = only fires on
  *  genuinely long stalls. Only relevant when the mid_pause trigger is ticked;
- *  this is the debounce DETECTION window, independent of the review cooldown
- *  (a pause detected during a cooldown gap joins the coalesced queue). */
+ *  this is the debounce DETECTION window; a pause detected while the
+ *  turn-interval gate is counting joins the staged coalesced queue. */
 function handleMidPause(ctx: ExtensionCommandContext, rest: string): void {
 	const arg = rest.trim().toLowerCase();
 	if (!arg) {
 		ctx.ui.notify(
-			`Advisor mid_pause debounce: ${formatCooldownMs(config.midPauseMs)} of agent inactivity before the once-per-run review fires ` +
-				`(default ${formatCooldownMs(DEFAULT_MID_PAUSE_MS)}).\n` +
+			`Advisor mid_pause debounce: ${formatDurationMs(config.midPauseMs)} of agent inactivity before the once-per-run review fires ` +
+				`(default ${formatDurationMs(DEFAULT_MID_PAUSE_MS)}).\n` +
 				`Requires the mid_pause trigger (currently ${config.triggers.includes("mid_pause") ? "ticked" : "NOT ticked — /advisor triggers mid_pause"}).\n` +
-				`Usage: /advisor pause <4000|4s>  (range ${MIN_MID_PAUSE_MS}ms-${formatCooldownMs(MAX_MID_PAUSE_MS)})`,
+				`Usage: /advisor pause <4000|4s>  (range ${MIN_MID_PAUSE_MS}ms-${formatDurationMs(MAX_MID_PAUSE_MS)})`,
 			"info",
 		);
 		return;
@@ -1005,7 +964,7 @@ function handleMidPause(ctx: ExtensionCommandContext, rest: string): void {
 	const ms = parseAdvisorMidPauseMs(arg);
 	if (ms === null) {
 		ctx.ui.notify(
-			`Invalid pause: "${arg}". Try 4000 or 4s (range ${MIN_MID_PAUSE_MS}ms-${formatCooldownMs(MAX_MID_PAUSE_MS)}).`,
+			`Invalid pause: "${arg}". Try 4000 or 4s (range ${MIN_MID_PAUSE_MS}ms-${formatDurationMs(MAX_MID_PAUSE_MS)}).`,
 			"error",
 		);
 		return;
@@ -1013,7 +972,7 @@ function handleMidPause(ctx: ExtensionCommandContext, rest: string): void {
 	updateConfig(
 		ctx,
 		(c) => ({ ...c, midPauseMs: ms }),
-		`Advisor mid_pause fires after ${formatCooldownMs(ms)} of agent inactivity (once per run).`,
+		`Advisor mid_pause fires after ${formatDurationMs(ms)} of agent inactivity (once per run).`,
 	);
 }
 
@@ -1112,7 +1071,7 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	lines.push(`Instructions mode: ${config.instructionsMode}`);
 	lines.push(`Project instructions: ${projectTrusted ? (instructions ? `active (${instructions.length} chars)` : "none") : "ignored (project not trusted)"} (${getProjectInstructionsPath(ctx.cwd)})`);
 	lines.push(`Global instructions: ${hasGlobalInstructions() ? `set (${readGlobalInstructions().length} chars)` : "not set"} (${getGlobalInstructionsPath()})`);
-	lines.push(`Context window: ~${config.contextChars.toLocaleString()} chars (~${Math.round(config.contextChars / 4).toLocaleString()} tokens) · max ${config.maxToolRounds} tool rounds${config.cooldownMs > 0 ? ` · cooldown ${config.cooldownMs}ms` : ""}`);
+	lines.push(`Context window: ~${config.contextChars.toLocaleString()} chars (~${Math.round(config.contextChars / 4).toLocaleString()} tokens) · max ${config.maxToolRounds} tool rounds · every ${config.turnInterval} turn(s)`);
 	lines.push(`Delivery: ${config.interrupting ? "ALL advice interrupts" : "nit → non-interrupting, concern/blocker → interrupting"} (steer${config.interrupting ? " + triggerTurn" : " + triggerTurn for concern/blocker"})`);
 
 	// Sync lag: show the setting, the live backlog (if the runtime has started),
@@ -1137,9 +1096,8 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	);
 	lines.push(
 		`Limits: max ${config.maxToolRounds} tool round(s)/review` +
-			` · cooldown ${config.cooldownMs === 0 ? "off" : formatCooldownMs(config.cooldownMs)}` +
 			` · every ${config.turnInterval} turn(s)` +
-			`  (/advisor rounds, /advisor cooldown, /advisor turns)`,
+			`  (/advisor rounds, /advisor turns)`,
 	);
 
 	const active = config.enabled && !!config.advisorModel;

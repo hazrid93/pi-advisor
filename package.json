@@ -1,6 +1,6 @@
 {
   "name": "@hazrid1993/pi-advisor",
-  "version": "0.6.10",
+  "version": "0.7.0",
   "description": "A second model that peer-reviews every turn of your main pi agent and injects concise advice. Pick any model from your registry as the advisor.",
   "type": "module",
   "engines": {

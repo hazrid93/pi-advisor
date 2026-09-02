@@ -99,7 +99,7 @@ const FAKE_MODEL: Model<Api> = {
 function makeRuntime(
 	review: ReviewFn,
 	branch: SessionEntry[] = [],
-	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; cooldownMs: number; turnInterval: number; syncLag: number; triggers: AdvisorTrigger[]; midPauseMs: number; cacheRetention: "none" | "short" | "long" }> = {},
+	config: Partial<{ maxRetries: number; contextChars: number; advisorModel: string | null; enabled: boolean; turnInterval: number; syncLag: number; triggers: AdvisorTrigger[]; midPauseMs: number; cacheRetention: "none" | "short" | "long" }> = {},
 ) {
 	const sendAdvice = vi.fn(async (_notes: AdvisorNote[], _model: string, _opts?: { forceNonTriggering?: boolean }) => {});
 	const host = { sendAdvice };
@@ -111,7 +111,6 @@ function makeRuntime(
 			thinking: false,
 			thinkingLevel: "medium" as const,
 			contextChars: config.contextChars ?? 12_000,
-			cooldownMs: config.cooldownMs ?? 0,
 			turnInterval: config.turnInterval ?? 1,
 			maxToolRounds: 6,
 			maxRetries: config.maxRetries ?? 3,
@@ -535,23 +534,24 @@ describe("AdvisorRuntime — history prefix (prompt-cache invariants)", () => {
 		expect(seen[0]).toContain("after error");
 	});
 
-	it("cooldown-coalesced deltas ride the next eligible review", async () => {
+	it("interval-skipped deltas ride the next eligible review", async () => {
 		const seen: string[] = [];
-		const { rt, ctx } = makeRuntime(async (text: string) => { seen.push(text); return { advise: null, rounds: 0 }; }, [], { cooldownMs: 40 });
+		const { rt, ctx } = makeRuntime(async (text: string) => { seen.push(text); return { advise: null, rounds: 0 }; }, [], { turnInterval: 3 });
 		const t1 = turn("alpha");
 		await rt.onTurnEnd(t1.message as AgentMessage, t1.toolResults, [entry("user", "u1")], ctx);
 		await settle(rt);
+		expect(seen).toHaveLength(0); // skipped by the interval, staged
 		const t2 = turn("beta");
 		await rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [entry("user", "u2")], ctx);
 		await settle(rt);
-		expect(seen).toHaveLength(1); // coalesced into the cooldown window
-		await new Promise((r) => setTimeout(r, 60)); // cooldown elapses
+		expect(seen).toHaveLength(0); // still counting
 		const t3 = turn("gamma");
 		await rt.onTurnEnd(t3.message as AgentMessage, t3.toolResults, [entry("user", "u3")], ctx);
 		await settle(rt);
-		expect(seen).toHaveLength(2);
-		expect(seen[1]).toContain("beta"); // not dropped — folded into the next review
-		expect(seen[1]).toContain("gamma");
+		expect(seen).toHaveLength(1); // third turn hit the interval
+		expect(seen[0]).toContain("alpha"); // not dropped — folded in
+		expect(seen[0]).toContain("beta");
+		expect(seen[0]).toContain("gamma");
 	});
 
 	it("history eviction drops the oldest half at user-message boundaries without orphaning toolResults", async () => {
@@ -692,21 +692,6 @@ describe("AdvisorRuntime — reviewNow", () => {
 		expect(result).toBeNull();
 		resolveReview({ advise: null, rounds: 0 });
 		await new Promise((r) => setTimeout(r, 10));
-	});
-});
-
-describe("AdvisorRuntime — cooldown (D3)", () => {
-	it("coalesces turns arriving inside the cooldown window", async () => {
-		const seen: string[] = [];
-		const { rt, sendAdvice, ctx } = makeRuntime(async (text: string) => { seen.push(text); return { advise: null, rounds: 0 }; }, [], { cooldownMs: 60_000 });
-		const t = turn("x");
-		void rt.onTurnEnd(t.message as AgentMessage, t.toolResults, [entry("user", "x")], ctx);
-		await settle(rt);
-		const t2 = turn("y");
-		void rt.onTurnEnd(t2.message as AgentMessage, t2.toolResults, [entry("user", "y")], ctx);
-		await settle(rt);
-		expect(seen).toHaveLength(1); // second turn coalesced, not reviewed
-		expect(sendAdvice).not.toHaveBeenCalled();
 	});
 });
 

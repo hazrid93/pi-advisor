@@ -9,7 +9,6 @@ import {
 	isInterruptingSeverity,
 	normalizeConfig,
 	parseAdvisorContextSize,
-	parseAdvisorCooldownMs,
 	parseAdvisorMidPauseMs,
 	parseAdvisorTurnInterval,
 	parseModelRef,
@@ -284,42 +283,6 @@ describe("cacheRetention", () => {
 	});
 });
 
-describe("parseAdvisorCooldownMs", () => {
-	it("parses milliseconds, seconds, and minutes", () => {
-		expect(parseAdvisorCooldownMs("30000")).toBe(30_000);
-		expect(parseAdvisorCooldownMs("500ms")).toBe(500);
-		expect(parseAdvisorCooldownMs("30s")).toBe(30_000);
-		expect(parseAdvisorCooldownMs("1m")).toBe(60_000);
-		expect(parseAdvisorCooldownMs("1.5m")).toBe(90_000);
-	});
-
-	it("off synonyms map to 0 (review every turn)", () => {
-		expect(parseAdvisorCooldownMs("0")).toBe(0);
-		expect(parseAdvisorCooldownMs("off")).toBe(0);
-		expect(parseAdvisorCooldownMs("none")).toBe(0);
-		expect(parseAdvisorCooldownMs("default")).toBe(0);
-	});
-
-	it("rejects invalid or out-of-range values", () => {
-		expect(parseAdvisorCooldownMs("soon")).toBeNull();
-		expect(parseAdvisorCooldownMs("-5s")).toBeNull();
-		expect(parseAdvisorCooldownMs("999m")).toBeNull(); // beyond MAX_COOLDOWN_MS
-		expect(parseAdvisorCooldownMs("")).toBeNull();
-	});
-
-	it("ships cost-safe defaults (advisor must not out-call the main model)", () => {
-		// 2 rounds covers list/grep → read without long tool chains; 30s caps
-		// turn_end-heavy runs at ~2 reviews/min while coalescing every burst.
-		expect(DEFAULT_CONFIG.maxToolRounds).toBe(2);
-		expect(DEFAULT_CONFIG.cooldownMs).toBe(30_000);
-		expect(normalizeConfig({}).maxToolRounds).toBe(2);
-		expect(normalizeConfig({}).cooldownMs).toBe(30_000);
-		// Explicit old values still round-trip (user choice is preserved).
-		expect(normalizeConfig({ cooldownMs: 0, maxToolRounds: 6 }).cooldownMs).toBe(0);
-		expect(normalizeConfig({ cooldownMs: 0, maxToolRounds: 6 }).maxToolRounds).toBe(6);
-	});
-});
-
 describe("parseAdvisorMidPauseMs", () => {
 	it("parses milliseconds and seconds", () => {
 		expect(parseAdvisorMidPauseMs("4000")).toBe(4000);
@@ -360,5 +323,17 @@ describe("parseAdvisorTurnInterval", () => {
 		expect(normalizeConfig({}).turnInterval).toBe(1);
 		expect(normalizeConfig({ turnInterval: 6 }).turnInterval).toBe(6);
 		expect(normalizeConfig({ turnInterval: 0 }).turnInterval).toBe(1); // invalid → default
+	});
+
+	it("ships cost-safe defaults (advisor must not out-call the main model)", () => {
+		// 2 tool rounds covers list/grep → read without long chains; cadence 1
+		// reviews every turn (turn up with /advisor turns for cheaper setups).
+		expect(DEFAULT_CONFIG.maxToolRounds).toBe(2);
+		expect(DEFAULT_CONFIG.turnInterval).toBe(1);
+		expect(normalizeConfig({}).maxToolRounds).toBe(2);
+		// cooldownMs is removed (superseded by turnInterval + settle flush);
+		// legacy configs carrying it are silently ignored by the normalizer.
+		expect(DEFAULT_CONFIG).not.toHaveProperty("cooldownMs");
+		expect(normalizeConfig({ cooldownMs: 0 } as never)).not.toHaveProperty("cooldownMs");
 	});
 });

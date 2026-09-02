@@ -171,12 +171,10 @@ export class AdvisorRuntime {
 	 *  than only the last round. Cleared with the conversation on reset(). */
 	#usageTotals = { reviews: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-	/** Last time a review was *started*, for the cooldown throttle (D3). */
-	#lastReviewAt = 0;
 	/** Completed-turn counter for the `turnInterval` cadence gate: a turn_end
 	 *  review is requested only every N turns (default 1 = every turn).
 	 *  Skipped turns keep their deltas staged (coalesced into the next review,
-	 *  exactly like cooldown-skipped ones). Reset with the conversation. */
+	 *  exactly like interval-skipped ones). Reset with the conversation. */
 	#turnsSinceReview = 0;
 
 	/** Latest-wins generation counter. Captured synchronously at the start of
@@ -261,8 +259,8 @@ export class AdvisorRuntime {
 	/** How many turns the advisor is behind the main agent right now: the queued
 	 *  backlog plus one if a review is currently in flight (the in-flight batch
 	 *  was already `shift()`ed out of `#pending`, so the +1 counts it). This is
-	 *  the backpressure metric `syncLag` gates against. Cooldown-coalesced turns
-	 *  (the early `return` in `#queueReview`) intentionally don't enqueue, so
+	 *  the backpressure metric `syncLag` gates against. Interval-skipped turns
+	 *  (the early `return` in `onTurnEnd`) intentionally don't enqueue, so
 	 *  they don't count as lag — they're folded into the next review's buffer. */
 	get lag(): number {
 		return this.#pending.length + (this.#busy ? 1 : 0);
@@ -379,12 +377,11 @@ export class AdvisorRuntime {
 		if (this.disposed || !this.config.enabled || !this.config.advisorModel) return Promise.resolve();
 		this.#cancelMidPause();
 		// Settle flush: a finished run always deserves its final review, even if
-		// turn_interval/cooldown skipped or deferred its last few turns — the
-		// staged deltas ride along, so nothing from the run goes unreviewed.
+		// the turn-interval gate skipped its last few turns — the staged deltas
+		// ride along, so nothing from the run goes unreviewed.
 		// Only fires when there's something new (staged deltas) and nothing
 		// already queued/in-flight. Non-triggering: advice lands as a note.
-		const throttled = this.config.turnInterval > 1 || this.config.cooldownMs > 0;
-		if (throttled && this.#contextChars > 0 && !this.#busy && this.#pending.length === 0) {
+		if (this.config.turnInterval > 1 && this.#contextChars > 0 && !this.#busy && this.#pending.length === 0) {
 			return this.requestReview({ source: "agent_settled", ctx, forceNonTriggering: true });
 		}
 		if (!this.#has("agent_settled")) return Promise.resolve();
@@ -489,10 +486,8 @@ export class AdvisorRuntime {
 		if (this.disposed || !this.config.advisorModel) return;
 		// Snapshot the generation SYNCHRONOUSLY (before any await) so overlapping
 		// events resolving auth out of order can't let an older snapshot win. We do
-		// NOT bump it here: bumping before the cooldown early-return would
-		// invalidate the in-flight review's delivery (gen mismatch) without
-		// enqueuing a replacement, silently dropping BOTH. The generation is only
-		// bumped once we commit to actually running (after cooldown passes).
+		// NOT bump it here: the generation is only bumped once we commit to
+		// actually running (the commit below).
 		const startGen = this.#generation;
 		const ctx = opts.ctx;
 		const ref = this.config.advisorModel;
@@ -532,15 +527,6 @@ export class AdvisorRuntime {
 			return;
 		}
 
-		// Cooldown (D3): if a review started too recently, coalesce into the buffer
-		// (the next review will cover it) and skip queueing. We return WITHOUT
-		// bumping the generation, so the in-flight review remains the latest and
-		// its delivery is not suppressed.
-		const now = Date.now();
-		if (this.config.cooldownMs > 0 && now - this.#lastReviewAt < this.config.cooldownMs) {
-			return;
-		}
-
 		// Commit: become the newest generation. Any still-in-flight review with an
 		// older gen will have its delivery suppressed.
 		const myGen = ++this.#generation;
@@ -549,7 +535,7 @@ export class AdvisorRuntime {
 		// this review; new captures accumulate in the buffer for the NEXT one). A
 		// superseded pending turn's deltas are MERGED in so latest-wins never
 		// drops captured content. This happens at commit (after the auth/gen/
-		// cooldown early-returns) so a dropped request leaves its deltas staged.
+		// interval gate early-returns) so a dropped request leaves its deltas staged.
 		const staged = this.#contextBuffer.join("\n\n");
 		this.#contextBuffer = [];
 		this.#contextChars = 0;
@@ -674,7 +660,6 @@ export class AdvisorRuntime {
 
 				if (batch.signal.aborted) continue;
 
-				this.#lastReviewAt = Date.now();
 				const result = await this.#runOne(batch);
 				if (this.#epoch !== epoch) continue; // reset during review
 				// A newer trigger arrived while this call was in flight. Discard the
