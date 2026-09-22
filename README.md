@@ -77,6 +77,12 @@ pi install git:git@github.com:hazrid93/pi-advisor
 
 Do not use the bare `github.com/hazrid93/pi-advisor` form; pi treats bare values as local paths.
 
+> **On the names:** the GitHub user is **`hazrid93`** and the npm scope is
+> **`@hazrid1993`**. They differ on purpose — both are this project. Anything
+> published under a different name is not.
+
+
+
 ### Update
 
 Use pi's package update command, then reload:
@@ -224,6 +230,13 @@ request diverges at that message, so the cache falls back to the previous
 review's breakpoint — roughly one review cycle is re-processed, then the
 prefix is warm again. Rare, bounded, and the price of keeping the history
 budget predictable.
+
+Where the prefix restarts: the advisor conversation is bounded by
+`contextChars`, and when it overflows the oldest **half** of the review
+segments is dropped at once — one cold request, then a warm run again until
+the next trim. It is also **reset outright** on session replacement,
+compaction, tree navigation, and advisor model/instruction changes. Expect a
+cold prefill at each of those points; that is the design, not a fault.
 
 ## Project-scoped advisor instructions
 

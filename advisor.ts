@@ -20,7 +20,9 @@
  *   blindly obey">` custom messages, filtered out of the advisor's own review
  *   window so it never recursively reviews its own advice.
  *
- * Install: `pi install https://github.com/hazrid93/pi-advisor` then `/reload`.
+ * Install: `pi install npm:@hazrid1993/pi-advisor` then `/reload`. (From source:
+ * `pi install git:github.com/hazrid93/pi-advisor` — the bare `github.com/...`
+ * form is treated as a local path, so it must carry the `git:` prefix.)
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
