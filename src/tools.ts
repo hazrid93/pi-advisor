@@ -17,8 +17,9 @@ import { Type } from "@earendil-works/pi-ai";
 import type { Api, Model, ThinkingLevel, Tool } from "@earendil-works/pi-ai";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { open, readdir, readFile, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AdvisorSeverity } from "./index.js";
 
 /** Hard cap on a single `read` result (chars). Mirrors pi core's read truncation. */
@@ -34,17 +35,60 @@ const GREP_LINE_MAX_CHARS = 500;
 /** Max bytes `grep` will read from one file. */
 const GREP_FILE_MAX_BYTES = 1_000_000;
 
-/** Resolve a path argument against the advisor's cwd, refusing escapes via `..`
- *  past the cwd root. The advisor is a reviewer; it must not wander outside the
- *  project it is reviewing. */
+/** Canonicalize a path as far as it exists on disk: `realpath` the deepest
+ *  existing ancestor, then re-attach the segments below it that do not exist.
+ *
+ *  `path.resolve()` alone is purely lexical — it collapses `..` but knows
+ *  nothing about symlinks — so a containment check built on it accepts any
+ *  link that lexically sits inside the root no matter where it points. The
+ *  partial-canonicalization walk matters for the same reason: a not-yet-
+ *  existing file under a symlinked directory would otherwise slip through
+ *  because `realpath` on the full path throws ENOENT.
+ *
+ *  Falls back to the lexical path when nothing in the chain can be resolved
+ *  (an unreadable ancestor); the caller's containment check still applies, and
+ *  a path we cannot `realpath` is one we cannot read either. */
+function canonicalize(target: string): string {
+	let head = target;
+	const tail: string[] = [];
+	for (;;) {
+		try {
+			const real = realpathSync(head);
+			return tail.length === 0 ? real : join(real, ...tail);
+		} catch {
+			const parent = dirname(head);
+			// Reached the filesystem root without resolving anything.
+			if (parent === head) return target;
+			tail.unshift(basename(head));
+			head = parent;
+		}
+	}
+}
+
+/** The canonical project root the advisor is confined to. Exported so the
+ *  file-walking tools report paths relative to the same root the containment
+ *  check uses (a cwd under a symlink — `/tmp` on macOS, for one — would
+ *  otherwise produce `../../…` display paths). */
+export function canonicalRoot(cwd: string): string {
+	return canonicalize(resolve(cwd));
+}
+
+/** Resolve a path argument against the advisor's cwd, refusing escapes past the
+ *  project root — whether via `..` or via a symlink. The advisor is a reviewer;
+ *  it must not wander outside the project it is reviewing.
+ *
+ *  Both the root and the target are canonicalized before comparison, so a link
+ *  inside the repo that points outside it (`ln -s ~/.ssh docs/x`) is refused
+ *  rather than followed. Returns the canonical path, so callers open the real
+ *  file rather than re-traversing the link. */
 export function resolveReadonlyPath(path: string, cwd: string): string {
 	const abs = isAbsolute(path) ? path : resolve(cwd, path);
-	const normalized = resolve(abs);
-	const root = resolve(cwd);
-	if (normalized !== root && !normalized.startsWith(root + sep)) {
+	const root = canonicalRoot(cwd);
+	const target = canonicalize(resolve(abs));
+	if (target !== root && !target.startsWith(root + sep)) {
 		throw new Error(`Path "${path}" escapes the project root (${root}).`);
 	}
-	return normalized;
+	return target;
 }
 
 /** The `read` tool — read a text file's contents, optionally a line slice. */
@@ -205,6 +249,9 @@ async function grepExecute(args: Record<string, unknown>, cwd: string): Promise<
 	const caseInsensitive = args.caseInsensitive === true;
 	try {
 		const abs = resolveReadonlyPath(path, cwd);
+		// Display paths must be relative to the same canonical root the
+		// containment check used, or a symlinked cwd yields `../../…` output.
+		const root = canonicalRoot(cwd);
 		const flags = caseInsensitive ? "gi" : "g";
 		const regex = literal ? new RegExp(escapeRegex(pattern), flags) : new RegExp(pattern, flags);
 		// Prefer ripgrep when available: far faster and respects .gitignore.
@@ -225,7 +272,7 @@ async function grepExecute(args: Record<string, unknown>, cwd: string): Promise<
 						const line = lines[i].length > GREP_LINE_MAX_CHARS
 							? lines[i].slice(0, GREP_LINE_MAX_CHARS) + "…"
 							: lines[i];
-						matches.push(`${relative(cwd, file)}:${i + 1}:${line}`);
+						matches.push(`${relative(root, file)}:${i + 1}:${line}`);
 					}
 				}
 			} catch {
@@ -248,11 +295,12 @@ async function findExecute(args: Record<string, unknown>, cwd: string): Promise<
 	const glob = args.glob === undefined ? hasWildcard : args.glob === true;
 	try {
 		const abs = resolveReadonlyPath(path, cwd);
+		const root = canonicalRoot(cwd);
 		const matcher = glob ? globToRegex(pattern) : (s: string) => s.includes(pattern);
 		const results: string[] = [];
 		await walkFiles(abs, async (file) => {
 			if (results.length >= FIND_MAX_RESULTS) return;
-			const rel = relative(cwd, file);
+			const rel = relative(root, file);
 			if (matcher(rel) || matcher(rel.split(sep).pop() ?? "")) {
 				results.push(rel);
 			}
