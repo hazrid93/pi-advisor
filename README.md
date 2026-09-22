@@ -437,7 +437,7 @@ The queue is single-flight, so advisor reviews never overlap. Epoch guards disca
 | Advisor misses earlier requirements | Increase context with `/advisor context 50k`; only post-start/reload prompts are accumulated |
 | Repeated review failures | Fix provider/rate-limit issues or choose another model; the backlog drops after three failures by default |
 | Project instruction is ignored | Ensure the project is trusted and check `/advisor instructions show` |
-| Read tool rejects a path | Advisor filesystem access is intentionally confined to the project root |
+| Read tool rejects a path | Advisor filesystem access is intentionally confined to the project root. Paths are canonicalized, so a symlink pointing outside the project is refused even though it sits inside it |
 
 ## Development
 

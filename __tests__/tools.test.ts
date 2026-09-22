@@ -3,7 +3,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,7 +18,9 @@ let dirs: string[] = [];
 function tmpProject(): string {
 	const d = mkdtempSync(join(tmpdir(), "pi-advisor-test-"));
 	dirs.push(d);
-	return d;
+	// Canonicalize: on macOS `tmpdir()` is /var/... which is a symlink to
+	// /private/var/..., and the confinement check compares canonical paths.
+	return realpathSync(d);
 }
 afterEach(() => {
 	for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -45,6 +47,64 @@ describe("resolveReadonlyPath", () => {
 	it("rejects a path that escapes the project root via ..", () => {
 		const cwd = tmpProject();
 		expect(() => resolveReadonlyPath("../../etc/passwd", cwd)).toThrow(/escapes the project root/);
+	});
+
+	// A lexical check (path.resolve alone) collapses `..` but knows nothing
+	// about symlinks, so every case below used to be accepted and followed.
+	describe("symlink confinement", () => {
+		it("rejects a file reached through a symlinked directory", () => {
+			const cwd = tmpProject();
+			const outside = tmpProject();
+			writeFileSync(join(outside, "secret.txt"), "TOPSECRET");
+			symlinkSync(outside, join(cwd, "docs"));
+			expect(() => resolveReadonlyPath("docs/secret.txt", cwd)).toThrow(/escapes the project root/);
+		});
+
+		it("rejects a symlinked file that points outside the root", () => {
+			const cwd = tmpProject();
+			const outside = tmpProject();
+			const secret = join(outside, "secret.txt");
+			writeFileSync(secret, "TOPSECRET");
+			symlinkSync(secret, join(cwd, "link.txt"));
+			expect(() => resolveReadonlyPath("link.txt", cwd)).toThrow(/escapes the project root/);
+		});
+
+		it("rejects a NON-EXISTENT path under a symlinked directory", () => {
+			// The partial-canonicalization case: realpath on the full path throws
+			// ENOENT, so a naive implementation falls back to the lexical path and
+			// lets this through.
+			const cwd = tmpProject();
+			const outside = tmpProject();
+			symlinkSync(outside, join(cwd, "docs"));
+			expect(() => resolveReadonlyPath("docs/nope.txt", cwd)).toThrow(/escapes the project root/);
+		});
+
+		it("allows a symlink that stays inside the project", () => {
+			const cwd = tmpProject();
+			const real = join(cwd, "real.txt");
+			writeFileSync(real, "fine");
+			symlinkSync(real, join(cwd, "alias.txt"));
+			// Resolves to the link TARGET, so callers open the real file.
+			expect(resolveReadonlyPath("alias.txt", cwd)).toBe(real);
+		});
+
+		it("still allows a non-existent path under a normal directory", () => {
+			// `read` should report a clean ENOENT here, not a confinement error.
+			const cwd = tmpProject();
+			mkdirSync(join(cwd, "sub"));
+			expect(resolveReadonlyPath("sub/missing.txt", cwd)).toBe(join(cwd, "sub", "missing.txt"));
+		});
+
+		it("refuses to read through a symlinked directory end to end", async () => {
+			const cwd = tmpProject();
+			const outside = tmpProject();
+			writeFileSync(join(outside, "creds.txt"), "TOPSECRET");
+			symlinkSync(outside, join(cwd, "docs"));
+			const r = await executeAdvisorTool("read", { path: "docs/creds.txt" }, cwd);
+			expect(r.isError).toBe(true);
+			expect(r.content).not.toContain("TOPSECRET");
+			expect(r.content).toMatch(/escapes the project root/);
+		});
 	});
 });
 
