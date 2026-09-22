@@ -28,6 +28,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
+	InputSource,
 } from "@earendil-works/pi-coding-agent";
 import {
 	ADVISOR_COMMAND_DESCRIPTION,
@@ -176,16 +177,25 @@ export default function (pi: ExtensionAPI) {
 	// triggers a prompt-review when `input` is ticked. (Fires before agent runs.)
 	// The prompt-review runs fire-and-forget so a slow advisor can't block the
 	// agent start; its advice lands as a steer once ready.
+	//
+	// `event.source` MUST be forwarded: the runtime ignores extension-injected
+	// input, and without the source that guard never fires (it would see
+	// `undefined` and treat another extension's injected user message as if the
+	// human had typed it).
 	pi.on("input", async (event, ctx) => {
 		if (!config.enabled || !config.advisorModel) return { action: "continue" as const };
 		const rt = ensureRuntime(pi);
-		void rt.onInput(event.text, {
-			signal: ctx.signal,
-			cwd: ctx.cwd,
-			modelRegistry: ctx.modelRegistry,
-			getApiKeyAndHeaders: (m) => ctx.modelRegistry.getApiKeyAndHeaders(m),
-			projectInstructions: activeInstructions(ctx.cwd, ctx.isProjectTrusted()),
-		});
+		void rt.onInput(
+			event.text,
+			{
+				signal: ctx.signal,
+				cwd: ctx.cwd,
+				modelRegistry: ctx.modelRegistry,
+				getApiKeyAndHeaders: (m) => ctx.modelRegistry.getApiKeyAndHeaders(m),
+				projectInstructions: activeInstructions(ctx.cwd, ctx.isProjectTrusted()),
+			},
+			event.source,
+		);
 		return { action: "continue" as const };
 	});
 

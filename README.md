@@ -303,11 +303,15 @@ cancel. Changes persist to the global config.
 | `mid_pause` | After a quiet period mid-run (debounced; at most once per input) |
 | `input` | On user input — a prompt/intent review before the agent acts |
 
-`input` only counts **real** user input (typed or RPC). pi also fires the
-`input` event for messages injected by extensions — including this
-extension's own `<advisory>` deliveries — and those are deliberately ignored,
-otherwise the advisor would review its own advice or re-arm `mid_pause` after
-every delivery (a self-triggering review loop).
+`input` only counts **real** user input (typed or RPC). A *user message*
+injected by another extension (via pi's `sendUserMessage`) fires `input` with
+`source: "extension"`, and those are ignored — otherwise the advisor would
+review another extension's injected prompt as if you had typed it, and re-arm
+the `mid_pause` debounce on every injection.
+
+This extension's own `<advisory>` deliveries never fire `input` at all: they
+are pi *custom* messages, and `sendCustomMessage` does not go through the input
+path.
 
 `agent_settled` is the robust choice for "review once when done, not every
 turn": it fires a single non-triggering review per run, so advice can't blast

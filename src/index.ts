@@ -116,10 +116,18 @@ export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string
 /** Selectable review trigger points. The advisor captures every finalized
  *  turn into its rolling buffer regardless of which triggers are enabled
  *  (capture is decoupled from scheduling); only the enabled triggers actually
- *  *schedule* a review. `input` is deliberately NOT a review point — it
- *  precedes any implementation output and is used only to delimit/reset a goal
- *  (and to cancel the `mid_pause` debounce). Multi-select, persisted globally,
- *  toggled via `/advisor triggers`. Default: `["turn_end", "tool_error"]`. */
+ *  *schedule* a review.
+ *
+ *  `input` ALWAYS delimits a goal (it arms/cancels the `mid_pause` debounce)
+ *  but only schedules a prompt-review when ticked — off by default, since it
+ *  precedes any implementation output. It counts REAL user input only:
+ *  extension-injected user messages arrive with `source: "extension"` and are
+ *  ignored, so another extension's injected prompt is never reviewed as if the
+ *  human typed it. This extension's own `<advisory>` deliveries are custom
+ *  messages and fire no `input` event at all.
+ *
+ *  Multi-select, persisted globally, toggled via `/advisor triggers`.
+ *  Default: `["turn_end", "tool_error"]`. */
 export type AdvisorTrigger =
 	| "turn_end"
 	| "tool_error"

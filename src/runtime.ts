@@ -32,7 +32,7 @@
 
 import type { Api, AssistantMessage, Message, Model, ProviderHeaders, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { InputSource, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { runAdvisorReview, type AdvisorAuth, type AdvisorReviewResult } from "./agent.js";
 import { buildSessionUpdate, serializeTurn } from "./transcript.js";
@@ -393,13 +393,20 @@ export class AdvisorRuntime {
 	 *  a review trigger. When `input` IS enabled: runs a prompt-review (judges
 	 *  intent before the agent acts) with the prompt as extra context.
 	 *
-	 *  `source: "extension"` inputs are IGNORED entirely. pi fires `input` for
-	 *  every `sendMessage` delivery — including THIS extension's own advice — so
-	 *  treating them as user input would make the advisor review its own advice
-	 *  (input trigger) or re-arm `mid_pause` after each delivery
-	 *  (`#midPauseFiredThisRun` reset), a self-triggering review loop. Only real
-	 *  user input (interactive/RPC) delimits a goal. */
-	onInput(text: string, ctx: ReviewCtx, source?: "interactive" | "rpc" | "extension"): Promise<void> {
+	 *  `source: "extension"` inputs are IGNORED entirely. pi fires `input` with
+	 *  that source for user messages injected by extensions (`sendUserMessage`
+	 *  routes through `prompt()` → `emitInput`). Treating those as human input
+	 *  would review another extension's injected prompt as if the user typed it,
+	 *  and would re-arm `mid_pause` (`#midPauseFiredThisRun` reset) on every
+	 *  injection. Only real user input (interactive/RPC) delimits a goal.
+	 *
+	 *  Note this extension's OWN `<advisory>` deliveries never reach here at all:
+	 *  `pi.sendMessage` creates a custom message, and `sendCustomMessage` does
+	 *  not route through `prompt()`, so it fires no `input` event.
+	 *
+	 *  The caller must forward pi's `event.source` — omitting it silently
+	 *  disables this guard. */
+	onInput(text: string, ctx: ReviewCtx, source?: InputSource): Promise<void> {
 		if (this.disposed || !this.config.enabled || !this.config.advisorModel) return Promise.resolve();
 		if (source === "extension") return Promise.resolve();
 		// Re-arm mid_pause for a new run: a fresh prompt means any prior quiet
