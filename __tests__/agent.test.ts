@@ -24,7 +24,9 @@ describe("runAdvisorReview", () => {
 		expect(result.advise).not.toBeNull();
 		expect(result.advise!.note).toBe("use the durable queue");
 		expect(result.advise!.severity).toBe("concern");
-		expect(result.rounds).toBe(1);
+		// `rounds` counts tool-execution rounds. An advise-only batch explores
+		// nothing, so it costs no budget — matching the test's own name.
+		expect(result.rounds).toBe(0);
 		// The first message sent to the model is the session update as a user turn.
 		expect(complete.calls[0].messages[0].role).toBe("user");
 	});
@@ -222,7 +224,9 @@ describe("runAdvisorReview", () => {
 		expect(secondMessages[4].role).toBe("toolResult");
 		expect(result.advise!.note).toBe("off-by-one in foo.txt");
 		expect(result.advise!.severity).toBe("blocker");
-		expect(result.rounds).toBe(2);
+		// One tool round (the read). The advise batch that followed explored
+		// nothing and does not consume the maxToolRounds budget.
+		expect(result.rounds).toBe(1);
 	});
 
 	it("ends as silence when the round cap is hit without an advise", async () => {
@@ -242,11 +246,21 @@ describe("runAdvisorReview", () => {
 			t.config,
 		);
 
-		// With maxToolRounds=2, the loop runs rounds 0, 1, 2 then hits the cap.
+		// With maxToolRounds=2: two tool rounds (a.txt, b.txt), then one verdict
+		// call offering `advise` only. The scripted third read is refused rather
+		// than executed, so the budget is a hard cap, not a suggestion.
 		expect(result.advise).toBeNull();
-		expect(result.rounds).toBe(3);
-		// Each round issued exactly one complete() call.
+		expect(result.rounds).toBe(2);
+		// Two exploring calls + the verdict call.
 		expect(complete.calls.length).toBe(3);
+		// The verdict call must not offer the filesystem tools.
+		const verdictTools = (complete.calls[2].tools ?? []).map((t) => t.name);
+		expect(verdictTools).toEqual(["advise"]);
+		// Nothing dangles: the refused call still got a paired toolResult, and
+		// the conversation ends judged rather than on an unanswered read.
+		const tail = result.appended!.at(-1)!;
+		expect(tail.role).toBe("toolResult");
+		expect(JSON.stringify(tail)).toContain("exploration budget is spent");
 	});
 
 	it("returns an error when auth has no apiKey", async () => {
@@ -335,5 +349,94 @@ describe("runAdvisorReview", () => {
 		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, ac.signal, t.config);
 		expect(result.error).toBe("aborted");
 		expect(complete.calls).toHaveLength(0);
+	});
+});
+
+/**
+ * `maxToolRounds` boundary semantics.
+ *
+ * The contract: N = the number of read-only tool rounds the advisor may
+ * execute. Whatever N is, the advisor always gets a final model call whose
+ * result is judged, so an "explore, then advise" pattern is never truncated
+ * with its verdict discarded.
+ */
+describe("runAdvisorReview: maxToolRounds boundaries", () => {
+	it("maxToolRounds 0 never executes a filesystem tool and still captures advice", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([
+			// The advisor tries to explore anyway; there is no budget for it.
+			assistantMessage([readCall("a.txt")]),
+			assistantMessage([adviseCall("should not be reached", "nit")]),
+		]);
+		const t = fakeTurn(model, complete, { cwd: __dirname, maxToolRounds: 0 });
+		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		// Only `advise` is ever offered, so the model is not invited to explore.
+		expect(complete.calls).toHaveLength(1);
+		expect((complete.calls[0].tools ?? []).map((x) => x.name)).toEqual(["advise"]);
+		expect(result.rounds).toBe(0);
+		// The refused read is answered (pairing) but never run.
+		const roles = result.appended!.map((m) => m.role);
+		expect(roles).toEqual(["user", "assistant", "toolResult"]);
+		expect(JSON.stringify(result.appended)).not.toContain("hello from foo");
+	});
+
+	it("maxToolRounds 0 captures an advise issued on the first call", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([assistantMessage([adviseCall("judged from the transcript", "concern")])]);
+		const t = fakeTurn(model, complete, { cwd: __dirname, maxToolRounds: 0 });
+		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		expect(result.advise!.note).toBe("judged from the transcript");
+		expect(result.rounds).toBe(0);
+		expect(complete.calls).toHaveLength(1);
+	});
+
+	it("explore → explore → advise is captured at maxToolRounds 2 (previously discarded)", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([
+			assistantMessage([readCall("foo.txt")]),
+			assistantMessage([readCall("foo.txt")]),
+			assistantMessage([adviseCall("found it on the second read", "blocker")]),
+		]);
+		const t = fakeTurn(model, complete, { cwd: __dirname, maxToolRounds: 2 });
+		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		expect(result.advise!.note).toBe("found it on the second read");
+		expect(result.advise!.severity).toBe("blocker");
+		expect(result.rounds).toBe(2);
+		expect(complete.calls).toHaveLength(3);
+	});
+
+	it("caps executed tool batches at maxToolRounds even when the model keeps exploring", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([assistantMessage([readCall("foo.txt")])]); // endless reads
+		const t = fakeTurn(model, complete, { cwd: __dirname, maxToolRounds: 3 });
+		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		expect(result.rounds).toBe(3);
+		// 3 exploring calls + 1 verdict call, and no more.
+		expect(complete.calls).toHaveLength(4);
+		expect((complete.calls[3].tools ?? []).map((x) => x.name)).toEqual(["advise"]);
+	});
+
+	it("never ends on an unjudged tool result: the tail is always answered", async () => {
+		const model = fakeModel();
+		const complete = scriptableComplete([assistantMessage([readCall("foo.txt")])]);
+		const t = fakeTurn(model, complete, { cwd: __dirname, maxToolRounds: 1 });
+		const result = await runAdvisorReview("### Session update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		// Every assistant toolCall has its paired toolResult (invariant: Anthropic
+		// rejects orphans, and the runtime persists `appended` as history).
+		const calls: string[] = [];
+		const results: string[] = [];
+		for (const m of result.appended!) {
+			if (m.role === "assistant") {
+				for (const c of m.content) if (c.type === "toolCall") calls.push(c.id);
+			} else if (m.role === "toolResult") {
+				results.push(m.toolCallId);
+			}
+		}
+		expect(results.sort()).toEqual(calls.sort());
 	});
 });

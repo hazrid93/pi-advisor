@@ -326,7 +326,7 @@ mid-run inactivity; a fluid run that never pauses fires nothing from it.
 | `/advisor interrupting [on\|off]` | Control whether all advice immediately triggers a main-agent turn |
 | `/advisor sync <0-6>` | Pause the main loop when the advisor falls this many turns behind; `0` disables waiting |
 | `/advisor context [chars\|Nk\|default]` | Inspect or set the advisor conversation budget |
-| `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `2`; each round is an extra LLM call — lower = cheaper) |
+| `/advisor rounds [0-12]` | Max advisor tool rounds per review (default `2`; the advisor always gets one final call to advise, so ≤ N+2 LLM calls — lower = cheaper) |
 | `/advisor turns [1-50\|every]` | Review every N turns instead of every turn (default `1`); skipped turns coalesce, and a finished run always flushes its final review |
 | `/advisor pause [4000\|4s]` | mid_pause quiet period before the once-per-run early-warning review (500ms–60s, default `4s`) |
 | `/advisor cache [short\|long\|none]` | Prompt-cache retention: `short` = 5m TTL (default), `long` = 1h for sparse cadences, `none` = disable markers + session affinity |
@@ -383,7 +383,7 @@ Example:
 | `thinkingLevel` | `"medium"` | Reasoning effort |
 | `contextChars` | `24000` | Advisor conversation budget (append-only, cache-friendly; oldest half dropped at once when exceeded) |
 | `turnInterval` | `1` | Review every N completed turns instead of every turn (work-cadence throttle — self-adjusts to slow vs rapid pacing); skipped turns coalesce; a finished run always flushes its final review; also `/advisor turns` |
-| `maxToolRounds` | `2` | Maximum read-only exploration rounds per review; each round is an extra LLM call — the main per-review cost lever; hard-capped at 12 |
+| `maxToolRounds` | `2` | Maximum read-only exploration rounds per review. After the last round the advisor gets one more call with `advise` as its only tool, so its verdict is always heard: at most N+2 LLM calls per review. `0` never offers the filesystem tools at all. The main per-review cost lever; hard-capped at 12 |
 | `maxRetries` | `3` | Consecutive failures before the backlog is dropped |
 | `interrupting` | `true` | Whether every advisory immediately triggers a turn |
 | `syncLag` | `0` | Backlog threshold before the main agent waits; `0` never waits |

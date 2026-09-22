@@ -881,18 +881,24 @@ function handleSync(ctx: ExtensionCommandContext, rest: string): void {
 	);
 }
 
-/** Set the max read-only tool rounds the advisor may take per review. Each
- *  round is an extra LLM call that re-sends the growing conversation, so this
- *  is the biggest per-review cost multiplier — the main knob for "advisor is
- *  calling the model too much". 0 = the advisor reviews without exploring
- *  (no tool calls; judge from the transcript alone). */
+/** Set the max read-only tool rounds the advisor may take per review.
+ *
+ *  N is the number of tool ROUNDS (batches of read/grep/find) the advisor may
+ *  execute. Each costs an extra LLM call re-sending the growing conversation,
+ *  so this is the biggest per-review cost multiplier — the main knob for
+ *  "advisor is calling the model too much". After the last round the advisor
+ *  gets one more call with `advise` as its only tool, so its verdict on what it
+ *  just read is always heard: total LLM calls per review are at most N + 2.
+ *  0 = judge from the transcript alone; the filesystem tools are never offered. */
 function handleRounds(ctx: ExtensionCommandContext, rest: string): void {
 	const arg = rest.trim().toLowerCase();
 	if (!arg) {
 		ctx.ui.notify(
 			`Advisor max tool rounds: ${config.maxToolRounds} per review (default ${DEFAULT_MAX_TOOL_ROUNDS}, hard cap ${ABSOLUTE_MAX_ROUNDS}).\n` +
-				`Each round is an extra advisor LLM call re-sending the conversation.\n` +
-				`0 = review without exploring; 2 covers the common list/grep → read pattern.\n` +
+				`N = tool batches the advisor may run; it then always gets one final\n` +
+				`call to advise on what it read. At most ${config.maxToolRounds + 2} advisor LLM calls per review.\n` +
+				`0 = review without exploring (read/grep/find are not offered at all);\n` +
+				`2 covers the common list/grep → read pattern.\n` +
 				`Usage: /advisor rounds <0-${ABSOLUTE_MAX_ROUNDS}>`,
 			"info",
 		);
@@ -908,7 +914,7 @@ function handleRounds(ctx: ExtensionCommandContext, rest: string): void {
 		(c) => ({ ...c, maxToolRounds: n }),
 		n === 0
 			? `Advisor tool rounds disabled — it will judge from the transcript without exploring.`
-			: `Advisor may take up to ${n} tool round(s) per review.`,
+			: `Advisor may take up to ${n} tool round(s) per review, plus a final call to advise (max ${n + 2} LLM calls).`,
 	);
 }
 
@@ -1096,6 +1102,7 @@ function showStatus(ctx: ExtensionCommandContext): void {
 	);
 	lines.push(
 		`Limits: max ${config.maxToolRounds} tool round(s)/review` +
+			` (≤ ${config.maxToolRounds + 2} advisor LLM calls: exploration + a final advise call)` +
 			` · every ${config.turnInterval} turn(s)` +
 			`  (/advisor rounds, /advisor turns)`,
 	);

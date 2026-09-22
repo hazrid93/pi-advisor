@@ -177,8 +177,11 @@ export interface AdvisorConfig {
 	 *  dropped at once. Also bounds the staging buffer of not-yet-reviewed
 	 *  per-turn deltas. */
 	contextChars: number;
-	/** Max read-only tool rounds the advisor may take per review before it must
-	 *  call `advise` or yield. Guards against a runaway advisor loop. */
+	/** Max read-only tool ROUNDS (batches of read/grep/find) the advisor may
+	 *  execute per review. After the last round it gets one final model call
+	 *  offering `advise` alone, so the results of that round are always judged
+	 *  — at most `maxToolRounds + 2` model calls per review. `0` never offers
+	 *  the filesystem tools. Guards against a runaway advisor loop. */
 	maxToolRounds: number;
 	/** Max attempts to retry a failed advisor review before dropping the backlog
 	 *  so the session never stalls. Mirrors oh-my-pi's 3-strike drop. */
