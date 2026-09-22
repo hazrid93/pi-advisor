@@ -81,6 +81,16 @@ export function readCall(path: string): ToolCall {
 	};
 }
 
+/** One recorded `complete()` invocation. `tools` is the toolset the loop
+ *  offered for that call — it narrows to `advise` alone once the exploration
+ *  budget is spent. */
+export interface ScriptedCall {
+	model: Model<Api>;
+	messages: Message[];
+	tools?: { name: string }[];
+	reasoning?: string;
+}
+
 /**
  * A scriptable fake `complete`. Each call pops the next scripted response.
  * Asserts it received the expected (model, context, options) shape so tests
@@ -89,15 +99,22 @@ export function readCall(path: string): ToolCall {
 export function scriptableComplete(
 	script: AssistantMessage[],
 	onCall?: (model: Model<Api>, context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] }, options?: { reasoning?: string; apiKey?: string; sessionId?: string; cacheRetention?: string }) => void,
-): AdvisorComplete & { calls: { model: Model<Api>; messages: Message[]; reasoning?: string }[] } {
-	const calls: { model: Model<Api>; messages: Message[]; reasoning?: string }[] = [];
+): AdvisorComplete & { calls: ScriptedCall[] } {
+	const calls: ScriptedCall[] = [];
 	let i = 0;
 	const fn = (async (
 		model: Model<Api>,
 		context: { systemPrompt?: string; messages: Message[]; tools?: unknown[] },
 		options?: { apiKey?: string; headers?: Record<string, string | null>; env?: Record<string, string>; signal?: AbortSignal; reasoning?: string; sessionId?: string; cacheRetention?: "none" | "short" | "long" },
 	) => {
-		calls.push({ model, messages: context.messages, reasoning: options?.reasoning });
+		calls.push({
+			model,
+			messages: context.messages,
+			// Snapshot the offered toolset: the loop narrows it to `advise` alone
+			// once the exploration budget is spent.
+			tools: (context.tools as { name: string }[] | undefined)?.map((t) => ({ name: t.name })),
+			reasoning: options?.reasoning,
+		});
 		onCall?.(model, context, options);
 		const next = script[i++] ?? script[script.length - 1];
 		if (!next) throw new Error("scriptableComplete: script exhausted");

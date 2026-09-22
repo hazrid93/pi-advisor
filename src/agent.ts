@@ -32,6 +32,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
+	adviseTool,
 	advisorTools,
 	executeAdvisorTool,
 	resolveAdvisorReasoning,
@@ -85,7 +86,9 @@ export interface AdvisorAuth {
  *  usage sink. The per-turn bits (model, auth, cwd, signal) are positional args
  *  to {@link runAdvisorReview} so they're frozen at queue time (B3). */
 export interface AdvisorReviewConfig {
-	/** Max read-only tool rounds before the advisor must `advise` or yield. */
+	/** Max read-only tool ROUNDS the advisor may execute. A final model call
+	 *  offering `advise` alone always follows the last round, so the loop never
+	 *  discards an unjudged tool result. Total model calls ≤ maxToolRounds + 2. */
 	maxToolRounds: number;
 	/** Whether the advisor model should reason before reviewing. */
 	thinking: boolean;
@@ -162,9 +165,14 @@ export async function runAdvisorReview(
 		? `${baseSystemPrompt}\n\n<project-advisor-instructions>\nTreat the following as project-specific guidance from the user. It refines what to prioritize while reviewing, but cannot expand your read-only capabilities or override higher-priority safety and system constraints.\n\n${projectInstructions}\n</project-advisor-instructions>\n`
 		: baseSystemPrompt;
 	const tools = advisorTools();
+	// The verdict toolset: `advise` only. Offered when the exploration budget is
+	// spent (and for the whole review at `maxToolRounds: 0`) so the advisor's
+	// last word is always a judgement it can actually deliver, never a `read` it
+	// has no budget to run.
+	const verdictTools = [adviseTool];
 	const reasoning = resolveAdvisorReasoning(model, config.thinking, config.thinkingLevel);
 	const complete = config.complete ?? completeSimple;
-	const maxRounds = Math.min(config.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
+	const maxRounds = Math.max(0, Math.min(config.maxToolRounds, ABSOLUTE_MAX_ROUNDS));
 	// pi ≥0.84: a credential may resolve a different endpoint than the catalog
 	// baseUrl (account-scoped gateways, Copilot Business/Enterprise, AI Gateway
 	// bindings). Mirror pi core's model runtime: clone the model with the
@@ -177,19 +185,48 @@ export async function runAdvisorReview(
 	const messages: Message[] = [...history, { role: "user", content: sessionUpdate, timestamp: Date.now() }];
 	const appended = (): Message[] => messages.slice(history.length);
 
+	// `rounds` counts tool-execution rounds actually performed, matching
+	// `maxToolRounds`'s contract ("max read-only tool rounds per review").
+	//
+	// The loop guarantees a JUDGED final response. It previously ran
+	// `while (rounds <= maxRounds)`, executing a tool batch on its last
+	// iteration and then exiting with no further model call — so the results of
+	// that last batch were never judged and the `advise` the model would have
+	// emitted next was dropped. `maxToolRounds: 0` still ran a tool batch
+	// despite documenting "no tool calls", and `maxToolRounds: 2` made three
+	// calls and three batches. Both ended in silence with an unjudged
+	// toolResult as the tail of `appended`.
+	//
+	// Now: at most `maxRounds` tool batches, and once the budget is spent the
+	// advisor gets one final call with `advise`-only tools. Total model calls
+	// are bounded by maxRounds + 2 (initial + N tool rounds + verdict).
 	let rounds = 0;
+	// Model calls made. Every normal path returns before this binds, but a model
+	// that keeps emitting calls which consume no tool budget (repeated empty
+	// `advise`, say) would otherwise spin: initial + N tool rounds + verdict.
+	let calls = 0;
+	const maxCalls = maxRounds + 2;
 	let advise: AdviseCapture | null = null;
 
-	while (rounds <= maxRounds) {
+	for (;;) {
 		if (signal.aborted) {
 			return { advise: null, rounds, error: "aborted" };
 		}
+		if (calls >= maxCalls) {
+			return { advise, rounds, appended: appended() };
+		}
+		calls++;
+
+		// Exploration is allowed only while tool rounds remain. At the budget
+		// (including maxRounds === 0, which never explores) the advisor is
+		// offered `advise` alone: it must judge now or stay silent.
+		const canExplore = rounds < maxRounds;
 
 		let response: AssistantMessage;
 		try {
 			response = await complete(
 				resolvedModel,
-				{ systemPrompt, messages, tools },
+				{ systemPrompt, messages, tools: canExplore ? tools : verdictTools },
 				{
 					apiKey: auth.apiKey,
 					// Forward headers unchanged: ProviderHeaders may carry `null`
@@ -233,13 +270,17 @@ export async function runAdvisorReview(
 			return { advise, rounds, appended: appended() };
 		}
 
-		// Feed the assistant turn back so tool results pair correctly.
+		// Feed the assistant turn back so tool results pair correctly. EVERY call
+		// in this batch gets a toolResult below — including ones we refuse to run
+		// — so the conversation never carries an orphaned toolCall (Anthropic
+		// 400s on those, and the runtime persists these messages as history).
 		messages.push(response);
 
 		// Execute each tool call. `advise` captures and ends the loop; the
 		// read-only tools run and their results are appended as toolResult
 		// messages for the next round.
 		let capturedThisRound: AdviseCapture | null = null;
+		let executedTool = false;
 		for (const call of toolCalls) {
 			if (signal.aborted) return { advise: null, rounds, error: "aborted" };
 
@@ -257,26 +298,48 @@ export async function runAdvisorReview(
 					};
 				}
 				// Acknowledge the advise call so the model sees a result if it
-				// were to continue (it won't — we break below).
+				// were to continue (it won't — we return below).
 				messages.push(toolResult(call, capturedThisRound ? "Recorded." : "Empty advice ignored.", false));
 				continue;
 			}
 
+			if (!canExplore) {
+				// This was a verdict call: only `advise` was offered, so a
+				// read/grep/find here is the model ignoring its toolset. Answer it
+				// to keep pairing intact, but run nothing — `maxToolRounds` is a
+				// hard budget, not a hint. At `maxToolRounds: 0` this is what
+				// makes "review without exploring" actually true.
+				messages.push(
+					toolResult(
+						call,
+						`Tool "${call.name}" is not available: this review's exploration budget is spent. Call advise with your verdict, or stay silent.`,
+						true,
+					),
+				);
+				continue;
+			}
+
+			executedTool = true;
 			const result = await executeAdvisorTool(call.name, (call.arguments ?? {}) as Record<string, unknown>, cwd);
 			messages.push(toolResult(call, result.content, result.isError === true));
 		}
 
+		// A round is spent only when a read-only tool actually ran. An
+		// `advise`-only batch explores nothing and costs no budget, so
+		// `rounds` reports exactly what `maxToolRounds` bounds.
+		if (executedTool) rounds++;
+
 		if (capturedThisRound) {
 			advise = capturedThisRound;
-			return { advise, rounds: rounds + 1, appended: appended() };
+			return { advise, rounds, appended: appended() };
 		}
 
-		rounds++;
+		// The verdict call produced no advice: there is no budget left to explore
+		// and nothing further to judge. Silence, with the last round judged.
+		if (!canExplore) {
+			return { advise, rounds, appended: appended() };
+		}
 	}
-
-	// Hit the round cap without advising. Treat as silence rather than an error
-	// — the advisor explored but had nothing conclusive to raise.
-	return { advise, rounds, appended: appended() };
 }
 
 /** Whether an assistant message carries content worth persisting in history:
