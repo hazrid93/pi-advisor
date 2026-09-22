@@ -49,6 +49,15 @@ import {
 	type AdvisorTrigger,
 } from "./index.js";
 
+/** The review function the runtime drives — structurally {@link runAdvisorReview}.
+ *
+ *  Derived from the real function rather than re-declared so the two can never
+ *  drift apart: when this was spelled out by hand (twice — once for the field,
+ *  once for the constructor parameter), the default wiring quietly forwarded
+ *  only six of the seven arguments and the advisor lost its whole persistent
+ *  conversation. Tests inject a fake through this same type. */
+export type ReviewFn = typeof runAdvisorReview;
+
 /** Minimal slice of the pi API the runtime drives. */
 export interface AdvisorRuntimeHost {
 	/** Deliver one advisor note batch into the primary session.
@@ -206,30 +215,20 @@ export class AdvisorRuntime {
 	 *  fake review instead of a real model call. The trailing `history` argument
 	 *  is the advisor's persistent conversation (sent unchanged as the leading
 	 *  prefix of every review — the prompt-cache invariant). */
-	#review: (
-		sessionUpdate: string,
-		model: Model<Api>,
-		auth: AdvisorAuth,
-		cwd: string,
-		signal: AbortSignal,
-		config: Parameters<typeof runAdvisorReview>[5],
-		history?: Message[],
-	) => Promise<AdvisorReviewResult>;
+	#review: ReviewFn;
 
 	constructor(
 		private readonly host: AdvisorRuntimeHost,
 		private readonly config: AdvisorConfig,
-		review?: (
-			sessionUpdate: string,
-			model: Model<Api>,
-			auth: AdvisorAuth,
-			cwd: string,
-			signal: AbortSignal,
-			config: Parameters<typeof runAdvisorReview>[5],
-			history?: Message[],
-		) => Promise<AdvisorReviewResult>,
+		review?: ReviewFn,
 	) {
-		this.#review = review ?? ((text, model, auth, cwd, signal, cfg) => runAdvisorReview(text, model, auth, cwd, signal, cfg));
+		// Forward EVERY argument, `history` included. Spelling the parameters out
+		// here once cost us the whole persistent-conversation feature: an arrow
+		// that named only six params silently dropped the seventh (arrows ignore
+		// extra arguments), so `#advisorHistory` was built, bounded and evicted
+		// but never sent. Delegating to `runAdvisorReview` directly keeps the
+		// arity tied to the function itself and makes that drift impossible.
+		this.#review = review ?? runAdvisorReview;
 	}
 
 	get isBusy(): boolean {
