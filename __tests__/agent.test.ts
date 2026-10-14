@@ -8,8 +8,42 @@
 
 import { describe, expect, it } from "vitest";
 import type { Message } from "@earendil-works/pi-ai";
-import { runAdvisorReview, type AdvisorComplete } from "../src/agent.js";
+import { completeViaRegistry, runAdvisorReview, type AdvisorComplete } from "../src/agent.js";
 import { adviseCall, fakeTurn, fakeModel, readCall, scriptableComplete, textAssistant, assistantMessage } from "./helpers.js";
+
+describe("completeViaRegistry (pi ≥1.0 model registry)", () => {
+	it("calls modelRegistry.streamSimple with the loop's context and options and returns the final message", async () => {
+		const model = fakeModel();
+		const final = assistantMessage([adviseCall("via registry", "nit")]);
+		const seen: unknown[] = [];
+		const registry = {
+			streamSimple: (m: unknown, ctx: unknown, opts: unknown) => {
+				// Snapshot: the loop keeps appending to the same messages array.
+				const c = ctx as { messages: Message[]; tools: unknown[] };
+				seen.push([m, { messages: [...c.messages], tools: c.tools }, opts]);
+				return { result: async () => final };
+			},
+		};
+		const t = fakeTurn(model, completeViaRegistry(registry as never));
+		const result = await runAdvisorReview("update", t.model, t.auth, t.cwd, t.signal, t.config);
+
+		expect(result.advise?.note).toBe("via registry");
+		expect(seen).toHaveLength(1);
+		const [m, ctx, opts] = seen[0] as [unknown, { messages: Message[]; tools: unknown[] }, { apiKey?: string }];
+		expect(m).toBe(model);
+		expect(ctx.messages.at(-1)?.role).toBe("user");
+		expect(ctx.tools.length).toBeGreaterThan(0);
+		expect(opts.apiKey).toBe("fake-key");
+	});
+
+	it("reports a clear error when no completion is available (pi older than 1.0)", async () => {
+		const t = fakeTurn(fakeModel(), (() => Promise.reject(new Error("unused"))) as AdvisorComplete);
+		t.config.complete = undefined;
+		const result = await runAdvisorReview("update", t.model, t.auth, t.cwd, t.signal, t.config);
+		expect(result.advise).toBeNull();
+		expect(result.error).toMatch(/pi 1\.0 or newer/);
+	});
+});
 
 describe("runAdvisorReview", () => {
 	it("captures an immediate advise call (no exploration)", async () => {

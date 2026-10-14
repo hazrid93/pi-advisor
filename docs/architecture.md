@@ -44,7 +44,7 @@ On every primary `turn_end`, the extension takes a bounded slice of the session 
                                                                                        │ per batch
                                                                                        ▼
                                               ┌──────── src/agent.ts (runAdvisorReview) ─────────┐
-                                              │  completeSimple() loop  (reasoning-aware)         │
+                                              │  streamSimple() loop   (reasoning-aware)         │
                                               │    messages = [ user: "Session update" ]          │
                                               │    tools = [ read, grep, find, advise ]           │
                                               │    ┌─────────────────────────────────────┐       │
@@ -83,7 +83,7 @@ On every primary `turn_end`, the extension takes a bounded slice of the session 
 | `src/prompts.ts` | **Prompt** | The advisor system prompt and `advise` tool description — **ported verbatim from oh-my-pi** (`prompts/advisor/system.md` + `advise-tool.md`). Defines the reviewer role: peer-programmer, not a second executor; can only read + advise. |
 | `src/tools.ts` | **Tools** | The advisor's hard-isolated read-only toolset: `read`, `grep`, `find` (re-implemented against the filesystem, read-only by construction — there is no write/edit capability at all — and confined to the project root) plus the `advise` tool that captures a note + severity. |
 | `src/transcript.ts` | **Context** | Builds the per-turn "Session update": slices the branch from the advisor's cursor, bounds it to `contextEntries`, filters out the advisor's own `<advisory>` entries (so it never reviews itself), and serializes via pi's public `convertToLlm` + `serializeConversation`. |
-| `src/agent.ts` | **Loop** | `runAdvisorReview()` — the advisor agent loop with pi-ai's `completeSimple()`: prompt → tool calls → execute read-only tools locally → capture `advise` → loop until `advise`/silence/round cap. Uses `/compat` so `reasoning`/thinking is honoured. |
+| `src/agent.ts` | **Loop** | `runAdvisorReview()` — the advisor agent loop over pi's `ctx.modelRegistry.streamSimple()`: prompt → tool calls → execute read-only tools locally → capture `advise` → loop until `advise`/silence/round cap. Uses the simple path so `reasoning`/thinking is honoured. |
 | `src/runtime.ts` | **Runtime** | `AdvisorRuntime` — the discipline ported from oh-my-pi: backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding, and `nit`→steer / `concern`→steer+triggerTurn delivery via `pi.sendMessage`. |
 
 ---
@@ -112,7 +112,7 @@ A single primary turn, from the user's prompt to a delivered advisory note:
   │                       │                          │                       │  #drain (single-    │                     │                       │                      │
   │                       │                          │                       │   flight, epoch)    │                     │                       │                      │
   │                       │                          │                       │── runAdvisorReview ──────────────────────►│                       │                      │
-  │                       │                          │                       │  resolveModel +     │                     │  completeSimple(...)  │                      │
+  │                       │                          │                       │  resolveModel +     │                     │  streamSimple(...)    │                      │
   │                       │                          │                       │  getApiKeyAndHeaders│                     │  (systemPrompt +      │                      │
   │                       │                          │                       │                     │                     │   tools + reasoning)  │                      │
   │                       │                          │                       │                     │                     │──► advisor model      │                      │
@@ -140,7 +140,7 @@ A single primary turn, from the user's prompt to a delivered advisory note:
 1. Resolves the configured `provider/id` to a `Model` and fetches its API key + headers from pi's `ModelRegistry` (same auth as the main agent — no separate key management).
 2. Sends the "Session update" as the first user message, with the advisor system prompt and the four tools (`read`, `grep`, `find`, `advise`).
 3. Loops (up to `maxToolRounds`, hard-capped at 12):
-   - Calls `completeSimple()` with `reasoning` set when thinking is on **and** the model declares `reasoning: true`.
+   - Calls `modelRegistry.streamSimple()` with `reasoning` set when thinking is on **and** the model declares `reasoning: true`.
    - If the advisor returns tool calls, executes them: `read`/`grep`/`find` run locally against the (confined) filesystem and their results are appended as `toolResult` messages; `advise` **captures** the note + severity and ends the loop.
    - If the advisor returns no tool calls (it stayed silent or just talked), the review ends with no advice — silence is a first-class, preferred outcome ("Prefer silence when the agent is on track").
    - If the round cap is hit without `advise`, the review ends as silence (the advisor explored but had nothing conclusive).
@@ -179,7 +179,7 @@ note text
 
 | oh-my-pi (internal) | pi-advisor (extension) | Notes |
 |---|---|---|
-| `advisor/runtime.ts` — backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding | `src/runtime.ts` | Same discipline, adapted to drive `completeSimple` instead of a second `Agent`. |
+| `advisor/runtime.ts` — backlog queue, single-flight `busy` guard, `epoch` counter, 3-strike failure drop, cursor seeding | `src/runtime.ts` | Same discipline, adapted to drive `modelRegistry.streamSimple` instead of a second `Agent`. |
 | `advisor/advise-tool.ts` — `nit`/`concern`/`blocker` severities, `<advisory guidance="weigh, don't blindly obey">` framing, severity-rank dedupe | `src/index.ts` + `src/tools.ts` | `advise` tool + `formatAdvisorBatchContent`. |
 | `prompts/advisor/system.md` + `advise-tool.md` — the reviewer role definition | `src/prompts.ts` | Ported verbatim. |
 | hard-isolated read-only toolset (`read`/`search`/`find`) on a distinct `ToolSession` | `src/tools.ts` | Re-implemented against the filesystem; read-only by construction (no write/edit code path exists) and confined to the project root. |
@@ -189,8 +189,8 @@ note text
 
 ### Key adaptations (and why)
 
-- **No second `Agent`.** oh-my-pi's advisor is a full `Agent` with its own append-only context, telemetry, and tool loop. The public pi extension API doesn't expose `Agent`, so the advisor loop is reimplemented with pi-ai's `completeSimple()`.
-- **`completeSimple`, not `complete`.** The `reasoning`/thinking option is only honoured on the `streamSimple` path; the plain `stream` path ignores it. Importing `completeSimple` from `@earendil-works/pi-ai/compat`.
+- **No second `Agent`.** oh-my-pi's advisor is a full `Agent` with its own append-only context, telemetry, and tool loop. The public pi extension API doesn't expose `Agent`, so the advisor loop is reimplemented over pi's `ctx.modelRegistry.streamSimple()`.
+- **`streamSimple`, not `stream`.** The `reasoning`/thinking option is only honoured on the simple path; the plain `stream` path ignores it. The advisor calls `ctx.modelRegistry.streamSimple()` (pi ≥1.0) rather than pi-ai's temporary `/compat` entrypoint, which pi plans to remove.
 - **Bounded recent window, not a byte-delta.** oh-my-pi feeds only the per-turn delta (rendered with its internal markdown formatter). This extension can't reach that formatter, so it sends a bounded trailing transcript window via pi's public helpers (the same ones pi's own `handoff` example uses). Slicing whole entries keeps assistant/toolCall + toolResult pairs intact.
 - **Fire-and-forget by default.** A review kicked from `turn_end` runs in the background and never blocks the main agent; advice lands via `pi.sendMessage` when ready. Optionally `/advisor sync <1-6>` makes the main loop pause at the awaited `turn_start` hook when the advisor falls `N` turns behind (bounded catch-up; fully abortable).
 - **Read-only tools re-implemented, not shared.** oh-my-pi builds its read/search/find against a distinct `ToolSession`. The extension API can't create a second tool session, so the read-only primitives are re-implemented directly against the filesystem — read-only by construction and confined to the project root.

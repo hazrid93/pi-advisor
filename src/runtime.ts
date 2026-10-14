@@ -4,7 +4,7 @@
  * Ported from oh-my-pi's `AdvisorRuntime`
  * (`packages/coding-agent/src/advisor/runtime.ts`), adapted to the pi extension
  * surface: instead of driving a second pi `Agent`, it runs `runAdvisorReview`
- * (a `completeSimple` loop) per queued turn and delivers the captured advice
+ * (a `streamSimple` loop over pi's model registry) per queued turn and delivers the captured advice
  * back into the primary session via `pi.sendMessage`.
  *
  * Preserved from oh-my-pi:
@@ -34,7 +34,14 @@ import type { Api, AssistantMessage, Message, Model, ProviderHeaders, ToolResult
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { runAdvisorReview, type AdvisorAuth, type AdvisorReviewResult } from "./agent.js";
+import {
+	completeViaRegistry,
+	runAdvisorReview,
+	type AdvisorAuth,
+	type AdvisorComplete,
+	type AdvisorReviewResult,
+	type StreamSimpleRegistry,
+} from "./agent.js";
 import { buildSessionUpdate, serializeTurn } from "./transcript.js";
 import {
 	ADVISOR_CUSTOM_TYPE,
@@ -66,7 +73,11 @@ export interface AdvisorRuntimeHost {
 export interface ReviewCtx {
 	signal?: AbortSignal;
 	cwd: string;
-	modelRegistry: { find(provider: string, id: string): Model<Api> | undefined };
+	modelRegistry: {
+		find(provider: string, id: string): Model<Api> | undefined;
+		/** pi ≥1.0: the advisor calls its model through this. */
+		streamSimple?: StreamSimpleRegistry["streamSimple"];
+	};
 	/** pi ≥0.84 resolves auth as ResolvedRequestAuth: `headers` are pi-ai
 	 *  ProviderHeaders (values may be `null` deletion markers) and a
 	 *  credential-resolved `baseUrl`/`env` may accompany the key. All are
@@ -119,6 +130,8 @@ interface PendingTurn {
 	gen: number;
 	/** Set for `agent_settled` reviews so delivery omits `triggerTurn`. */
 	forceNonTriggering?: boolean;
+	/** Completion over pi's model registry (frozen at queue time). */
+	complete?: AdvisorComplete;
 }
 
 export class AdvisorRuntime {
@@ -552,6 +565,9 @@ export class AdvisorRuntime {
 			signal: this.#adoptSignal(ctx.signal),
 			gen: myGen,
 			forceNonTriggering: opts.forceNonTriggering,
+			complete: ctx.modelRegistry.streamSimple
+				? completeViaRegistry(ctx.modelRegistry as StreamSimpleRegistry)
+				: undefined,
 		};
 		// Latest-wins: keep at most one pending; a newer request replaces an older
 		// one that hasn't drained yet.
@@ -774,6 +790,7 @@ export class AdvisorRuntime {
 			projectInstructions: turn.projectInstructions,
 			sessionId: this.#sessionId,
 			cacheRetention: this.config.cacheRetention,
+			complete: turn.complete,
 			onUsage: (usage) => {
 				this.#lastUsage = usage;
 				const t = this.#usageTotals;

@@ -4,7 +4,7 @@
  *
  * This is the wiring layer: pi event hooks + the `/advisor` command. The
  * advisor runtime (delta tracking, serialized drain, retries, epoch guards) is
- * in `src/runtime.ts`; the advisor agent loop (`completeSimple` + read-only
+ * in `src/runtime.ts`; the advisor agent loop (`modelRegistry.streamSimple` + read-only
  * tools + `advise` capture) is in `src/agent.ts`; the read-only toolset is in
  * `src/tools.ts`; the system prompt (ported from oh-my-pi) is in
  * `src/prompts.ts`; config lives in `src/index.ts`.

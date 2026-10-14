@@ -4,14 +4,15 @@
  * oh-my-pi implements the advisor as a full `Agent` (from its pi-agent-core
  * fork) with its own append-only context, telemetry, and tool-execution loop.
  * The public pi extension API doesn't expose that `Agent` class, so this module
- * re-implements the essential advisor loop with pi-ai's `completeSimple()`: it
+ * re-implements the essential advisor loop on pi's `ctx.modelRegistry.streamSimple()`: it
  * prompts the advisor model with the session update + a hard-isolated read-only
  * toolset, executes read/grep/find locally, captures the `advise` call, and
  * loops until the advisor calls `advise`, stays silent, or hits the round cap.
  *
- * `completeSimple` (not `complete`) is used because the `reasoning`/thinking
- * option is only honoured on the `streamSimple` path — the plain `stream` path
- * ignores it. Tools ride in `context.tools` and are forwarded by every
+ * `streamSimple` (not `stream`) is used because the `reasoning`/thinking
+ * option is only honoured on the simple path — the plain `stream` path
+ * ignores it. Going through pi's model registry (pi ≥1.0) also applies pi's
+ * own request-time auth, virtual-model routing, and header transforms. Tools ride in `context.tools` and are forwarded by every
  * provider's `streamSimple` implementation, so tool-calling + thinking both
  * work.
  *
@@ -22,6 +23,8 @@
 import type {
 	Api,
 	AssistantMessage,
+	Context,
+	SimpleStreamOptions,
 	Message,
 	Model,
 	ProviderHeaders,
@@ -30,7 +33,6 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	advisorTools,
 	executeAdvisorTool,
@@ -41,7 +43,7 @@ import { ADVISOR_SYSTEM_PROMPT, ADVISE_TOOL_DESCRIPTION } from "./prompts.js";
 
 void ADVISE_TOOL_DESCRIPTION;
 
-/** The completion function signature — pi-ai's `completeSimple`. Injected so the
+/** The completion function signature (the `completeSimple` shape). Injected so the
  *  loop is unit-testable with a fake model (no network, no API key). */
 export type AdvisorComplete = (
 	model: Model<Api>,
@@ -97,7 +99,8 @@ export interface AdvisorReviewConfig {
 	projectInstructions?: string;
 	/** Optional sink for advisor model usage (tokens/cost) for /advisor status. */
 	onUsage?: (usage: AssistantMessage["usage"], model: Model<Api>) => void;
-	/** Injected completion function (defaults to pi-ai's `completeSimple`). */
+	/** Completion function. The runtime passes {@link completeViaRegistry} over
+	 *  pi's model registry; tests inject a fake. */
 	complete?: AdvisorComplete;
 	/** Stable per-session identifier forwarded to the provider as a prompt-cache
 	 *  key / session-affinity id (see AdvisorComplete options). */
@@ -125,6 +128,17 @@ export interface AdvisorReviewResult {
 	 *  and the advisor can see what it previously said/did. A failed or aborted
 	 *  review returns nothing here — a partial turn could orphan toolCalls. */
 	appended?: Message[];
+}
+
+/** The part of pi's `ModelRegistry` (pi ≥1.0) the advisor calls models through. */
+export interface StreamSimpleRegistry {
+	streamSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): { result(): Promise<AssistantMessage> };
+}
+
+/** Adapt pi's `ctx.modelRegistry.streamSimple()` to {@link AdvisorComplete}. */
+export function completeViaRegistry(registry: StreamSimpleRegistry): AdvisorComplete {
+	return (model, context, options) =>
+		registry.streamSimple(model, context, options as SimpleStreamOptions | undefined).result();
 }
 
 /** Hard cap on total loop iterations even if maxToolRounds is set very high.
@@ -163,7 +177,10 @@ export async function runAdvisorReview(
 		: baseSystemPrompt;
 	const tools = advisorTools();
 	const reasoning = resolveAdvisorReasoning(model, config.thinking, config.thinkingLevel);
-	const complete = config.complete ?? completeSimple;
+	const complete = config.complete;
+	if (!complete) {
+		return { advise: null, rounds: 0, error: "pi-advisor needs pi 1.0 or newer (ctx.modelRegistry.streamSimple is missing)" };
+	}
 	const maxRounds = Math.min(config.maxToolRounds, ABSOLUTE_MAX_ROUNDS);
 	// pi ≥0.84: a credential may resolve a different endpoint than the catalog
 	// baseUrl (account-scoped gateways, Copilot Business/Enterprise, AI Gateway
